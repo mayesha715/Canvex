@@ -4,12 +4,15 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 1 is implemented as backend schema foundation:
+Phase 2 is implemented as backend auth foundation:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
 - Initial PostgreSQL schema migration
 - Seed script with users, channel, pages, elements, and element events
+- Password hashing with bcrypt
+- JWT access tokens and rotating refresh tokens
+- Auth endpoints for registration, login, refresh, logout, and current user lookup
 
 ## Local Backend Setup
 
