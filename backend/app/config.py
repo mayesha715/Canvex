@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     gemini_api_key: str = ""
+    api_base_url: str = "http://localhost:8000"
     environment: str = "development"
 
     model_config = SettingsConfigDict(
