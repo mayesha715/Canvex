@@ -1,55 +1,36 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.middleware.auth import get_current_user
-from app.middleware.rbac import ROLE_RANK, require_channel_role
+from app.middleware.rbac import require_channel_role
 from app.models.channel import ChannelMember
-from app.models.element import ElementPermission, WhiteboardElement
-from app.models.enums import ElementType, EventOperation, MemberRole
+from app.models.element import WhiteboardElement
+from app.models.enums import ElementType, MemberRole
 from app.models.page import WhiteboardPage
 from app.models.user import User
 from app.schemas.whiteboard import ElementCreate, ElementRead, ElementUpdate, PageCreate, PageRead, PageUpdate
-from app.services.element_events import element_state, log_element_event
+from app.services.elements import (
+    assert_minimum_role,
+    create_element_for_page,
+    delete_element_state,
+    get_channel_membership_for_user,
+    get_element_or_404,
+    get_page_or_404,
+    update_element_state,
+)
 
 router = APIRouter(tags=["whiteboard"])
 
 PageAccess = tuple[WhiteboardPage, ChannelMember]
 ElementAccess = tuple[WhiteboardElement, WhiteboardPage, ChannelMember]
-
-
-async def get_page_or_404(db: AsyncSession, page_id: UUID) -> WhiteboardPage:
-    page = await db.get(WhiteboardPage, page_id)
-    if page is None or page.is_deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
-    return page
-
-
-async def get_element_or_404(db: AsyncSession, element_id: UUID) -> WhiteboardElement:
-    element = await db.get(WhiteboardElement, element_id)
-    if element is None or element.is_deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Element not found")
-    return element
-
-
-async def get_channel_membership_for_user(db: AsyncSession, channel_id: UUID, user_id: UUID) -> ChannelMember:
-    membership = await db.scalar(
-        select(ChannelMember).where(
-            ChannelMember.channel_id == channel_id,
-            ChannelMember.user_id == user_id,
-        )
-    )
-    if membership is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not a member of this channel")
-    return membership
 
 
 def require_page_role(minimum_role: MemberRole) -> Callable[..., Coroutine[Any, Any, PageAccess]]:
@@ -60,8 +41,7 @@ def require_page_role(minimum_role: MemberRole) -> Callable[..., Coroutine[Any, 
     ) -> PageAccess:
         page = await get_page_or_404(db, page_id)
         membership = await get_channel_membership_for_user(db, page.channel_id, current_user.id)
-        if ROLE_RANK[membership.role] < ROLE_RANK[minimum_role]:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient channel role")
+        assert_minimum_role(membership, minimum_role)
         return page, membership
 
     return dependency
@@ -76,27 +56,10 @@ def require_element_role(minimum_role: MemberRole) -> Callable[..., Coroutine[An
         element = await get_element_or_404(db, element_id)
         page = await get_page_or_404(db, element.page_id)
         membership = await get_channel_membership_for_user(db, page.channel_id, current_user.id)
-        if ROLE_RANK[membership.role] < ROLE_RANK[minimum_role]:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient channel role")
+        assert_minimum_role(membership, minimum_role)
         return element, page, membership
 
     return dependency
-
-
-async def assert_can_mutate_element(
-    db: AsyncSession,
-    element: WhiteboardElement,
-    role: MemberRole,
-    *,
-    deleting: bool = False,
-) -> None:
-    permission = await db.get(ElementPermission, {"element_id": element.id, "role": role})
-    if permission is None:
-        return
-    if not permission.can_edit:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Element is locked for your role")
-    if deleting and not permission.can_delete:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Element cannot be deleted by your role")
 
 
 @router.post("/channels/{channel_id}/pages", response_model=PageRead, status_code=status.HTTP_201_CREATED)
@@ -242,24 +205,11 @@ async def create_element(
     db: AsyncSession = Depends(get_db),
 ) -> WhiteboardElement:
     _page, _membership = access
-    element = WhiteboardElement(
-        page_id=page_id,
-        created_by=current_user.id,
-        type=payload.type,
-        transform=payload.transform,
-        style=payload.style,
-        content=payload.content,
-    )
-    db.add(element)
-    await db.flush()
-    await log_element_event(
+    element = await create_element_for_page(
         db,
-        element=element,
+        page_id=page_id,
+        payload=payload,
         actor_id=current_user.id,
-        operation=EventOperation.CREATE,
-        before_state=None,
-        after_state=element_state(element),
-        vector_clock=payload.vector_clock,
     )
     await db.commit()
     await db.refresh(element)
@@ -274,24 +224,12 @@ async def update_element(
     db: AsyncSession = Depends(get_db),
 ) -> WhiteboardElement:
     element, _page, membership = access
-    update_data = payload.model_dump(exclude={"vector_clock"}, exclude_unset=True, exclude_none=True)
-    if not update_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No element fields to update")
-
-    await assert_can_mutate_element(db, element, membership.role)
-    before_state = element_state(element)
-    for field, value in update_data.items():
-        setattr(element, field, value)
-    element.updated_at = datetime.now(UTC)
-    await db.flush()
-    await log_element_event(
+    await update_element_state(
         db,
         element=element,
+        payload=payload,
         actor_id=current_user.id,
-        operation=EventOperation.UPDATE,
-        before_state=before_state,
-        after_state=element_state(element),
-        vector_clock=payload.vector_clock,
+        role=membership.role,
     )
     await db.commit()
     await db.refresh(element)
@@ -305,18 +243,11 @@ async def delete_element(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     element, _page, membership = access
-    await assert_can_mutate_element(db, element, membership.role, deleting=True)
-    before_state = element_state(element)
-    element.is_deleted = True
-    element.updated_at = datetime.now(UTC)
-    await db.flush()
-    await log_element_event(
+    await delete_element_state(
         db,
         element=element,
         actor_id=current_user.id,
-        operation=EventOperation.DELETE,
-        before_state=before_state,
-        after_state=element_state(element),
+        role=membership.role,
     )
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

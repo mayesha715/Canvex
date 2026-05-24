@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 4 is implemented as the backend whiteboard persistence layer:
+Phase 5 backend is implemented as the realtime whiteboard transport layer:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -21,6 +21,11 @@ Phase 4 is implemented as the backend whiteboard persistence layer:
 - Element JSONB type and text search filters
 - Append-only element event logging for every element mutation
 - Element-level permission checks for role-specific edit/delete locks
+- WebSocket room manager for page-scoped collaboration
+- Authenticated `WS /ws/{page_id}` endpoint
+- WebSocket element create/update/delete operations backed by the Phase 4 event log
+- Redis-backed element locks with disconnect cleanup
+- Cursor presence broadcast and `GET /pages/{id}/presence`
 
 ## Local Backend Setup
 
