@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 3 is implemented as backend channel and membership foundation:
+Phase 4 is implemented as the backend whiteboard persistence layer:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -16,6 +16,11 @@ Phase 3 is implemented as backend channel and membership foundation:
 - Channel CRUD
 - Channel membership RBAC
 - Invite generation and acceptance
+- Whiteboard page create/list/update/soft-delete endpoints
+- Element create/list/update/soft-delete endpoints
+- Element JSONB type and text search filters
+- Append-only element event logging for every element mutation
+- Element-level permission checks for role-specific edit/delete locks
 
 ## Local Backend Setup
 
