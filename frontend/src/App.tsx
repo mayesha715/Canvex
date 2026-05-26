@@ -4,7 +4,7 @@ import AuthPanel from './components/AuthPanel'
 import CanvasBoard from './components/CanvasBoard'
 import Sidebar from './components/Sidebar'
 import { createChannel, createPage, getChannel, getMe, listChannels, logout } from './lib/api'
-import { clearSession, loadSession, saveSession } from './lib/storage'
+import { clearSession, loadSession } from './lib/storage'
 import type { AuthSession, ChannelDetail, ChannelListItem, PageSummary } from './types'
 
 const App = () => {
@@ -14,6 +14,7 @@ const App = () => {
   const [selectedPage, setSelectedPage] = useState<PageSummary | null>(null)
   const [isBooting, setIsBooting] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const accessToken = session?.accessToken
 
   const handleSelectChannel = useCallback(async (channelId: string) => {
     const detail = await getChannel(channelId)
@@ -28,37 +29,48 @@ const App = () => {
   const refreshChannels = useCallback(async () => {
     const data = await listChannels()
     setChannels(data)
-    if (data.length && !selectedChannel) {
+    if (data.length) {
       await handleSelectChannel(data[0].id)
+    } else {
+      setSelectedChannel(null)
+      setSelectedPage(null)
     }
-  }, [handleSelectChannel, selectedChannel])
+  }, [handleSelectChannel])
 
   useEffect(() => {
+    let cancelled = false
+
     const boot = async () => {
-      if (!session) {
+      if (!accessToken) {
+        setChannels([])
+        setSelectedChannel(null)
+        setSelectedPage(null)
         setIsBooting(false)
         return
       }
       try {
-        const user = await getMe()
-        const updatedSession = { ...session, user }
-        saveSession(updatedSession)
-        setSession(updatedSession)
+        await getMe()
+        if (cancelled) return
         await refreshChannels()
       } catch {
+        if (cancelled) return
         clearSession()
         setSession(null)
+        setChannels([])
+        setSelectedChannel(null)
+        setSelectedPage(null)
       } finally {
-        setIsBooting(false)
+        if (!cancelled) {
+          setIsBooting(false)
+        }
       }
     }
-    boot()
-  }, [refreshChannels, session])
 
-  useEffect(() => {
-    if (!session) return
-    refreshChannels().catch(() => setError('Failed to load channels.'))
-  }, [refreshChannels, session])
+    boot()
+    return () => {
+      cancelled = true
+    }
+  }, [accessToken, refreshChannels])
 
   const handleCreateChannel = async (payload: { name: string; description?: string }) => {
     try {
@@ -84,11 +96,14 @@ const App = () => {
 
   const handleLogout = async () => {
     if (!session) return
-    await logout(session.refreshToken)
-    setSession(null)
-    setChannels([])
-    setSelectedChannel(null)
-    setSelectedPage(null)
+    try {
+      await logout(session.refreshToken)
+    } finally {
+      setSession(null)
+      setChannels([])
+      setSelectedChannel(null)
+      setSelectedPage(null)
+    }
   }
 
   const pageList = useMemo(() => selectedChannel?.pages ?? [], [selectedChannel])

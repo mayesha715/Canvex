@@ -26,9 +26,20 @@ Phase 5 is implemented end-to-end with backend realtime transport and a collabor
 - WebSocket element create/update/delete operations backed by the Phase 4 event log
 - Redis-backed element locks with disconnect cleanup
 - Cursor presence broadcast and `GET /pages/{id}/presence`
-- React + Fabric.js canvas UI with tool palette
+- React + Fabric.js canvas UI with select, rectangle, ellipse, and text tools
 - WebSocket client for element ops, locks, and live cursors
 - Channel/page shell with authentication flow
+
+## Local Full-Stack Setup
+
+The backend and frontend run as separate development servers:
+
+- FastAPI API: `http://localhost:8000`
+- Vite frontend: `http://localhost:5173`
+- PostgreSQL: Docker service `postgres`
+- Redis: Docker service `redis`
+
+Start infrastructure first, then run the backend and frontend in separate terminals.
 
 ## Local Backend Setup
 
@@ -39,7 +50,12 @@ Phase 5 is implemented end-to-end with backend realtime transport and a collabor
 docker compose up -d postgres redis
 ```
 
-3. Install Python dependencies in `backend/`.
+3. Install Python dependencies in the shared project virtual environment, if needed:
+
+```powershell
+C:\Users\Istiak\Desktop\Projects\.venv\Scripts\python -m pip install -r backend\requirements.txt
+```
+
 4. Run migrations:
 
 ```powershell
@@ -76,3 +92,32 @@ npm install
 ```powershell
 npm run dev
 ```
+
+Open `http://localhost:5173` in the browser. The frontend expects the API URL from `frontend/.env`:
+
+```text
+VITE_API_URL=http://localhost:8000
+```
+
+## Useful Checks
+
+Backend:
+
+```powershell
+C:\Users\Istiak\Desktop\Projects\.venv\Scripts\python -m ruff check backend
+C:\Users\Istiak\Desktop\Projects\.venv\Scripts\python backend\scripts\check_phase5_ws.py
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm run lint
+npm run build
+```
+
+## Phase 5 Notes
+
+- Element create/update/delete operations are persisted through the backend WebSocket route and still write to the append-only event log.
+- Create acknowledgements use a client operation id so rapid local creates are matched to the correct Fabric object.
+- The pen/freehand tool is intentionally hidden for now because full Fabric path serialization belongs with the later CRDT/offline work.

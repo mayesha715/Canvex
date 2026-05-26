@@ -1,12 +1,12 @@
-import { Canvas, Ellipse, FabricObject, Line, PencilBrush, Polyline, Rect, Textbox } from 'fabric'
-import { Brush, Circle, Move, PenLine, RectangleHorizontal, Text } from 'lucide-react'
+import { Canvas, Ellipse, FabricObject, Line, Polyline, Rect, Textbox } from 'fabric'
+import { Brush, Circle, Move, RectangleHorizontal, Text } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { getPresenceCount, listElements } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import type { Element, ElementType, PageSummary, User } from '../types'
 
-type Tool = 'select' | 'pen' | 'rect' | 'ellipse' | 'text'
+type Tool = 'select' | 'rect' | 'ellipse' | 'text'
 
 type CanvasObject = FabricObject & {
   elementId?: string
@@ -31,7 +31,6 @@ type CanvasBoardProps = {
 
 const TOOL_LABELS: Record<Tool, string> = {
   select: 'Select',
-  pen: 'Pen',
   rect: 'Rectangle',
   ellipse: 'Ellipse',
   text: 'Text',
@@ -293,12 +292,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     activeToolRef.current = tool
     const canvas = fabricRef.current
     if (!canvas) return
-    canvas.isDrawingMode = tool === 'pen'
-    canvas.freeDrawingBrush = canvas.freeDrawingBrush ?? new PencilBrush(canvas)
-    if (canvas.freeDrawingBrush) {
-      canvas.freeDrawingBrush.width = 2
-      canvas.freeDrawingBrush.color = '#1f2937'
-    }
+    canvas.isDrawingMode = false
   }, [tool])
 
   useEffect(() => {
@@ -468,29 +462,40 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   useEffect(() => {
     const pageId = page?.id
     if (!pageId || !fabricRef.current) return
+    let cancelled = false
+
     const load = async () => {
       try {
         const elements = await listElements(pageId)
+        if (cancelled || pageRef.current?.id !== pageId || !fabricRef.current) return
         applyingRemote.current = true
-        fabricRef.current?.clear()
-        if (fabricRef.current) {
-          fabricRef.current.backgroundColor = '#f8fafc'
-        }
+        fabricRef.current.clear()
+        fabricRef.current.backgroundColor = '#f8fafc'
         objectsById.current.clear()
         pendingCreates.current.clear()
         setCursors({})
         elements.filter((element) => !element.is_deleted).forEach(addElementToCanvas)
-        applyingRemote.current = false
       } catch {
-        setStatusMessage('Failed to load elements for this page.')
+        if (!cancelled) {
+          setStatusMessage('Failed to load elements for this page.')
+        }
+      } finally {
+        if (!cancelled) {
+          applyingRemote.current = false
+        }
       }
     }
+
     load()
+    return () => {
+      cancelled = true
+    }
   }, [addElementToCanvas, page?.id])
 
   useEffect(() => {
-    if (!page) return
-    const wsUrl = new URL(`/ws/${page.id}`, import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
+    const pageId = page?.id
+    if (!pageId) return
+    const wsUrl = new URL(`/ws/${pageId}`, import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
     wsUrl.protocol = wsUrl.protocol.replace('http', 'ws')
     wsUrl.searchParams.set('token', accessToken)
     const socket = new WebSocket(wsUrl.toString())
@@ -609,7 +614,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       socket.close()
       wsRef.current = null
     }
-  }, [accessToken, addElementToCanvas, page, removeElementFromCanvas, updateElementOnCanvas, user.id])
+  }, [accessToken, addElementToCanvas, page?.id, removeElementFromCanvas, updateElementOnCanvas, user.id])
 
   useEffect(() => {
     const pageId = page?.id
@@ -664,14 +669,6 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         >
           <Move size={16} />
           {TOOL_LABELS.select}
-        </button>
-        <button
-          type="button"
-          className={`toolbar-button ${tool === 'pen' ? 'active' : ''}`}
-          onClick={() => setTool('pen')}
-        >
-          <PenLine size={16} />
-          {TOOL_LABELS.pen}
         </button>
         <button
           type="button"
