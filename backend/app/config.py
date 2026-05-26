@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     api_base_url: str = "http://localhost:8000"
     environment: str = "development"
+    cors_allow_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ]
 
     model_config = SettingsConfigDict(
         env_file=".env",

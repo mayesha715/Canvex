@@ -1,0 +1,93 @@
+import axios from 'axios'
+
+import { clearSession, loadSession, saveSession } from './storage'
+import type { AuthSession, ChannelDetail, ChannelListItem, Element, PageSummary, User } from '../types'
+
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+
+export const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+})
+
+apiClient.interceptors.request.use((config) => {
+  const session = loadSession()
+  if (session?.accessToken) {
+    config.headers = config.headers ?? {}
+    config.headers.Authorization = `Bearer ${session.accessToken}`
+  }
+  return config
+})
+
+export const login = async (email: string, password: string): Promise<AuthSession> => {
+  const form = new URLSearchParams()
+  form.set('username', email)
+  form.set('password', password)
+  const { data } = await apiClient.post('/auth/token', form, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  })
+  const user = await getMe(data.access_token)
+  const session = { accessToken: data.access_token, refreshToken: data.refresh_token, user }
+  saveSession(session)
+  return session
+}
+
+export const register = async (
+  email: string,
+  displayName: string,
+  password: string,
+): Promise<AuthSession> => {
+  const { data } = await apiClient.post('/auth/register', {
+    email,
+    display_name: displayName,
+    password,
+  })
+  const session = { accessToken: data.access_token, refreshToken: data.refresh_token, user: data.user }
+  saveSession(session)
+  return session
+}
+
+export const logout = async (refreshToken: string) => {
+  await apiClient.post('/auth/logout', { refresh_token: refreshToken })
+  clearSession()
+}
+
+export const getMe = async (overrideToken?: string): Promise<User> => {
+  const { data } = await apiClient.get('/auth/me', {
+    headers: overrideToken ? { Authorization: `Bearer ${overrideToken}` } : undefined,
+  })
+  return data
+}
+
+export const listChannels = async (): Promise<ChannelListItem[]> => {
+  const { data } = await apiClient.get('/channels')
+  return data
+}
+
+export const getChannel = async (channelId: string): Promise<ChannelDetail> => {
+  const { data } = await apiClient.get(`/channels/${channelId}`)
+  return data
+}
+
+export const createChannel = async (payload: {
+  name: string
+  description?: string
+  is_private?: boolean
+}): Promise<ChannelListItem> => {
+  const { data } = await apiClient.post('/channels', payload)
+  return data
+}
+
+export const createPage = async (channelId: string, title: string): Promise<PageSummary> => {
+  const { data } = await apiClient.post(`/channels/${channelId}/pages`, { title })
+  return data
+}
+
+export const listElements = async (pageId: string): Promise<Element[]> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/elements`)
+  return data
+}
+
+export const getPresenceCount = async (pageId: string): Promise<number> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/presence`)
+  return data.count ?? 0
+}

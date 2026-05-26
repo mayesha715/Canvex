@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 5 backend is implemented as the realtime whiteboard transport layer:
+Phase 5 is implemented end-to-end with backend realtime transport and a collaborative frontend:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -26,6 +26,9 @@ Phase 5 backend is implemented as the realtime whiteboard transport layer:
 - WebSocket element create/update/delete operations backed by the Phase 4 event log
 - Redis-backed element locks with disconnect cleanup
 - Cursor presence broadcast and `GET /pages/{id}/presence`
+- React + Fabric.js canvas UI with tool palette
+- WebSocket client for element ops, locks, and live cursors
+- Channel/page shell with authentication flow
 
 ## Local Backend Setup
 
@@ -57,3 +60,19 @@ uvicorn app.main:app --reload
 ```
 
 The smoke test endpoint is `GET /health`.
+
+## Local Frontend Setup
+
+1. Copy `frontend/.env.example` to `frontend/.env` and adjust `VITE_API_URL` if needed.
+2. Install frontend dependencies:
+
+```powershell
+cd frontend
+npm install
+```
+
+3. Start the Vite dev server:
+
+```powershell
+npm run dev
+```
