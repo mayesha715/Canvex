@@ -121,7 +121,7 @@ const App = () => {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
+    <div className="workspace-shell flex h-screen overflow-hidden text-slate-950">
       <Sidebar
         user={session.user}
         channels={channels}
@@ -135,22 +135,22 @@ const App = () => {
         }}
         onCreatePage={handleCreatePage}
       />
-      <main className="flex flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-slate-800/70 px-6 py-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+      <main className="workspace-main relative flex flex-1 flex-col">
+        <header className="workspace-context-bar">
+          <div className="workspace-channel-heading">
+            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">
               Channel
             </p>
-            <h2 className="text-lg font-semibold text-white">
+            <h2 className="font-reading-serif text-xl text-slate-950">
               {selectedChannel?.name ?? 'No channel selected'}
             </h2>
           </div>
-          <div className="flex items-center gap-3">
-            {error && <span className="text-sm text-rose-400">{error}</span>}
+          <div className="workspace-header-actions">
+            {error && <span className="text-sm font-medium text-rose-600">{error}</span>}
             <button
               type="button"
               onClick={handleLogout}
-              className="rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 hover:border-slate-600"
+              className="workspace-ghost-button"
             >
               Sign out
             </button>

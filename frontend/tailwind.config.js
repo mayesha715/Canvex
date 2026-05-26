@@ -4,7 +4,9 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['Geist', 'system-ui', 'sans-serif'],
+        handwriting: ['Caveat', 'cursive'],
+        'reading-serif': ['Literata', 'Georgia', 'serif'],
         mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
       },
       boxShadow: {

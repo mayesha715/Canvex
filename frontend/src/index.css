@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;900&family=Literata:opsz,wght@7..72,400;7..72,600;7..72,900&family=JetBrains+Mono:wght@400;600&family=Caveat:wght@400;500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,11 +6,11 @@
 
 @layer base {
   :root {
-    color-scheme: dark;
+    color-scheme: light;
   }
 
   body {
-    @apply bg-slate-950 text-slate-100 antialiased;
+    @apply bg-[#f8f9ff] text-slate-950 antialiased;
   }
 
   button {
@@ -42,11 +42,466 @@
   .form-label {
     @apply text-xs font-semibold uppercase tracking-wide text-slate-400;
   }
+
+  .auth-notebook {
+    @apply relative flex items-start justify-end overflow-hidden bg-[#f4f4ec] px-6 py-7 sm:px-10 lg:px-16;
+    font-family: "Geist", system-ui, sans-serif;
+    background-image:
+      linear-gradient(rgba(70, 72, 212, 0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(220, 50, 50, 0.1) 1px, transparent 1px);
+    background-position: 0 0, 86px 0;
+    background-size: 100% 32px, 100% 100%;
+  }
+
+  .auth-notebook::after {
+    @apply pointer-events-none absolute inset-0 z-10;
+    content: "";
+    background: radial-gradient(circle at 78% 45%, rgba(244, 244, 236, 0.14) 0 18rem, rgba(244, 244, 236, 0.08) 28rem, transparent 42rem);
+  }
+
+  .auth-notebook::before {
+    @apply pointer-events-none absolute inset-0 z-10;
+    content: "";
+    background:
+      linear-gradient(90deg, rgba(244, 244, 236, 0) 0%, rgba(244, 244, 236, 0.04) 48%, rgba(244, 244, 236, 0.2) 62%, rgba(244, 244, 236, 0.28) 100%),
+      radial-gradient(circle at 78% 45%, rgba(255, 255, 250, 0.2) 0 15rem, rgba(244, 244, 236, 0.1) 24rem, transparent 36rem);
+  }
+
+  .auth-notebook-art {
+    @apply pointer-events-none absolute inset-0 z-0 h-full w-full select-none object-cover;
+    opacity: 0.92;
+    filter: grayscale(0.04) contrast(1.02) brightness(1.02);
+    mix-blend-mode: multiply;
+    -webkit-mask-image: linear-gradient(to right, transparent 0%, black 4%, black 52%, transparent 64%);
+    mask-image: linear-gradient(to right, transparent 0%, black 4%, black 52%, transparent 64%);
+  }
+
+  .auth-notebook-lines {
+    @apply pointer-events-none absolute inset-0 z-20;
+    background-image:
+      linear-gradient(rgba(70, 72, 212, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(220, 50, 50, 0.12) 1px, transparent 1px);
+    background-position: 0 0, 86px 0;
+    background-size: 100% 32px, 100% 100%;
+  }
+
+  .paper-margin-line {
+    @apply pointer-events-none absolute bottom-0 top-0 z-30 w-px bg-red-500/10 sm:bg-red-500/20;
+    left: 86px;
+  }
+
+  .auth-ink-login {
+    @apply relative z-40 flex w-full max-w-[31rem] flex-col items-center lg:mr-3 xl:mr-8;
+  }
+
+  @media (max-width: 1023px) {
+    .auth-notebook {
+      @apply justify-center;
+    }
+
+    .auth-notebook::after {
+      background: radial-gradient(circle at 50% 45%, rgba(244, 244, 236, 0.2) 0 19rem, rgba(244, 244, 236, 0.12) 28rem, transparent 42rem);
+    }
+
+    .auth-notebook::before {
+      background:
+        linear-gradient(90deg, rgba(244, 244, 236, 0.08) 0%, rgba(244, 244, 236, 0.18) 38%, rgba(244, 244, 236, 0.32) 58%, rgba(244, 244, 236, 0.24) 100%),
+        radial-gradient(circle at 50% 44%, rgba(255, 255, 250, 0.28) 0 16rem, rgba(244, 244, 236, 0.14) 25rem, transparent 38rem);
+    }
+
+    .auth-notebook-art {
+      opacity: 0.86;
+    }
+  }
+
+  .auth-register-field {
+    max-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: max-height 200ms ease, opacity 160ms ease;
+  }
+
+  .auth-register-field.open {
+    max-height: 110px;
+    opacity: 1;
+  }
+
+  .auth-feedback-error {
+    animation: auth-shake 180ms ease-in-out;
+  }
+
+  .stamped-logo {
+    font-family: "Literata", Georgia, serif;
+    text-shadow: 1px 1px 0 rgba(255, 255, 255, 0.8);
+    filter: drop-shadow(1px 1px 0 rgba(79, 70, 229, 0.15));
+  }
+
+  .auth-tab-shell {
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  }
+
+  .auth-tab {
+    @apply py-1.5 text-center text-base font-normal text-slate-900 transition-colors hover:text-indigo-600;
+  }
+
+  .auth-tab.active {
+    @apply text-slate-950;
+    box-shadow: inset 0 -2px 0 rgba(99, 102, 241, 0.75);
+  }
+
+  .ink-field {
+    @apply p-0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    position: relative;
+  }
+
+  .ink-field::after {
+    @apply absolute -bottom-1 left-0 right-0 h-0.5 rounded-full bg-indigo-500 transition-transform duration-300;
+    content: "";
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .ink-field:focus-within::after {
+    transform: scaleX(1);
+  }
+
+  .auth-label {
+    @apply mb-2 block text-base font-normal text-slate-900;
+    font-family: "Geist", system-ui, sans-serif;
+  }
+
+  .auth-input {
+    @apply w-full border-0 border-b border-slate-300/70 bg-transparent py-1 pl-7 text-sm text-slate-950 placeholder-slate-400 outline-none transition-colors focus:border-transparent focus:ring-0;
+  }
+
+  .auth-input-icon {
+    @apply absolute left-0 top-1/2 -translate-y-1/2 text-slate-500 transition-colors;
+  }
+
+  .ink-field:focus-within .auth-input-icon {
+    @apply text-indigo-700;
+  }
+
+  .auth-submit {
+    @apply flex w-full items-center justify-center gap-2 rounded-md border border-dashed border-indigo-500 bg-transparent py-2.5 text-lg font-normal text-indigo-600 transition-all hover:bg-indigo-50/40 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60;
+    box-shadow: none;
+  }
+
+  .auth-secondary-action {
+    @apply flex w-full items-center justify-center gap-3 border-0 border-b border-slate-300/60 bg-transparent py-1.5 text-base font-normal text-slate-950 transition-colors hover:text-indigo-600;
+    font-family: "Geist", system-ui, sans-serif;
+    box-shadow: none;
+  }
+
+  .workspace-shell {
+    background-color: #f5f4ec;
+    background-image:
+      linear-gradient(rgba(70, 72, 212, 0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(220, 50, 50, 0.1) 1px, transparent 1px);
+    background-position: 0 0, 86px 0;
+    background-size: 100% 32px, 100% 100%;
+    font-family: "Geist", system-ui, sans-serif;
+  }
+
+  .workspace-main {
+    min-width: 0;
+  }
+
+  .workspace-context-bar {
+    @apply pointer-events-none absolute left-[5.5rem] right-6 top-4 z-40 flex items-start justify-between gap-4;
+  }
+
+  .workspace-channel-heading,
+  .workspace-header-actions,
+  .workspace-context-bar button,
+  .workspace-context-bar span {
+    @apply pointer-events-auto;
+  }
+
+  .workspace-header-actions {
+    @apply flex items-center gap-3;
+  }
+
+  .workspace-ghost-button {
+    @apply rounded-lg border border-slate-300/70 bg-white/50 px-3 py-1.5 text-sm font-medium text-slate-700 backdrop-blur-sm hover:border-indigo-300 hover:text-indigo-600;
+  }
+
+  .workspace-sidebar {
+    @apply relative z-40 overflow-hidden border-r border-slate-200/90 text-slate-950 backdrop-blur-md;
+    background-color: rgba(245, 244, 236, 0.9);
+    box-shadow: 8px 0 30px rgba(15, 23, 42, 0.04);
+  }
+
+  .workspace-sidebar::after {
+    @apply pointer-events-none absolute bottom-0 left-0 z-0 h-72 w-72 select-none;
+    content: "";
+    background-image: url("./assets/canvex-paper-bg.png");
+    background-position: bottom left;
+    background-repeat: no-repeat;
+    background-size: 280px auto;
+    opacity: 0.055;
+    mix-blend-mode: multiply;
+  }
+
+  .workspace-sidebar > * {
+    @apply relative z-10;
+  }
+
+  .workspace-user-strip {
+    @apply rounded-lg border border-slate-200/90 bg-white/60 p-4;
+  }
+
+  .workspace-chip {
+    @apply inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-indigo-700;
+  }
+
+  .workspace-list-item {
+    @apply flex w-full items-center justify-between rounded-md border border-transparent px-3 py-2 text-left text-sm text-slate-600 hover:border-slate-200 hover:bg-white/40 hover:text-slate-950;
+  }
+
+  .workspace-list-item.active {
+    @apply border-indigo-200 bg-white/60 text-indigo-700;
+    box-shadow: inset 3px 0 0 rgba(70, 72, 212, 0.8);
+  }
+
+  .workspace-input {
+    @apply w-full rounded-md border border-slate-200/90 bg-white/50 px-3 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-200/40;
+  }
+
+  .workspace-action-button {
+    @apply inline-flex items-center gap-2 rounded-md border border-slate-300/80 bg-white/50 px-3 py-2 text-sm font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-600;
+  }
+
+  .workspace-page-label {
+    @apply pointer-events-none absolute left-[5.5rem] top-36 z-40;
+  }
+
+  .workspace-presence {
+    @apply absolute right-6 top-4 z-50 flex items-center gap-2;
+  }
+
+  .workspace-avatar {
+    @apply flex h-8 w-8 items-center justify-center rounded-full border-2 border-[#f5f4ec] bg-indigo-100 text-[11px] font-bold text-indigo-700;
+  }
+
+  .workspace-avatar.muted {
+    @apply bg-slate-100 text-slate-600;
+  }
+
+  .workspace-live-chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white/60 px-3 py-1.5 text-xs font-medium text-slate-500 backdrop-blur-sm;
+  }
+
+  .workspace-live-chip::before {
+    @apply h-2 w-2 rounded-full bg-slate-300;
+    content: "";
+  }
+
+  .workspace-live-chip.online {
+    @apply text-emerald-700;
+  }
+
+  .workspace-live-chip.online::before {
+    @apply bg-emerald-500;
+    animation: live-pulse 1.4s ease-in-out infinite;
+  }
+
+  .workspace-ai-button {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50/80 px-3 py-1.5 text-sm font-medium text-indigo-700 backdrop-blur-sm hover:bg-indigo-100/80;
+  }
+
+  .workspace-tool-capsule {
+    @apply absolute left-1/2 top-[4.75rem] z-50 flex max-w-[calc(100%-7rem)] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-full border border-slate-200/90 bg-white/75 px-4 py-2 text-slate-600 shadow-sm backdrop-blur-md;
+    scrollbar-width: none;
+  }
+
+  .workspace-tool-capsule::after {
+    @apply pointer-events-none sticky right-0 -mr-4 h-8 w-8 shrink-0 rounded-r-full;
+    content: "";
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.94));
+  }
+
+  .workspace-tool-capsule::-webkit-scrollbar {
+    display: none;
+  }
+
+  @media (max-width: 900px) {
+    .workspace-shell {
+      flex-direction: column;
+      height: auto !important;
+      min-height: 100svh;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+    }
+
+    .workspace-sidebar {
+      width: 100% !important;
+      height: auto !important;
+      max-height: 43svh;
+      overflow-y: auto;
+      border-right: 0;
+      border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+      padding: 1rem;
+    }
+
+    .workspace-main {
+      min-height: 57svh;
+      flex: none !important;
+    }
+
+    .workspace-context-bar {
+      left: 1.25rem;
+      right: 1.25rem;
+      top: 0.875rem;
+    }
+
+    .workspace-header-actions {
+      align-items: flex-start;
+    }
+
+    .workspace-page-label {
+      left: 1.25rem;
+      top: 5.5rem;
+      max-width: calc(100% - 2.5rem);
+    }
+
+    .workspace-presence {
+      right: 1.25rem;
+      top: 5.25rem;
+    }
+
+    .workspace-ai-button {
+      width: 2.5rem;
+      height: 2.5rem;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .workspace-ai-label {
+      display: none;
+    }
+
+    .workspace-tool-capsule {
+      left: 1.25rem;
+      right: 1.25rem;
+      top: 9.25rem;
+      max-width: none;
+      width: auto;
+      transform: none;
+      justify-content: flex-start;
+    }
+
+    .canvas-surface {
+      padding-top: 10.5rem;
+    }
+
+    .workspace-ai-panel {
+      bottom: 1rem;
+      left: 1rem;
+      right: 1rem;
+      width: auto;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .workspace-sidebar {
+      max-height: 50svh;
+    }
+
+    .workspace-main {
+      min-height: 50svh;
+    }
+
+    .workspace-context-bar h2,
+    .workspace-page-label h2 {
+      font-size: 1.35rem;
+      line-height: 1.2;
+    }
+
+    .workspace-ghost-button {
+      padding: 0.375rem 0.65rem;
+    }
+
+    .workspace-live-chip {
+      display: none;
+    }
+  }
+
+  .workspace-tool-button {
+    @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-600 hover:bg-[#dde9ff] hover:text-indigo-700;
+  }
+
+  .workspace-tool-button.active {
+    @apply bg-[#dde9ff] text-indigo-700 ring-1 ring-indigo-200;
+  }
+
+  .workspace-tool-button.ghost {
+    @apply text-slate-500;
+  }
+
+  .workspace-tool-divider {
+    @apply mx-1 h-5 w-px shrink-0 bg-slate-200;
+  }
+
+  .workspace-swatches {
+    @apply flex shrink-0 items-center gap-1 px-1;
+  }
+
+  .workspace-swatch {
+    @apply h-4 w-4 rounded-full border border-white shadow-sm ring-1 ring-slate-200 transition-transform duration-100;
+  }
+
+  .workspace-swatch.active {
+    @apply ring-2 ring-indigo-500 ring-offset-2 ring-offset-white;
+    transform: scale(1.15);
+  }
+
+  .workspace-status-message {
+    @apply absolute bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-full border border-indigo-200 bg-white/90 px-4 py-2 text-xl font-semibold text-indigo-700 shadow-sm backdrop-blur-sm;
+    font-family: "Caveat", cursive;
+  }
+
+  .workspace-ai-panel {
+    @apply absolute bottom-6 right-6 z-[80] w-80 rounded-2xl border border-dashed border-indigo-300 bg-white/90 p-4 shadow-lg backdrop-blur-md;
+  }
+}
+
+@keyframes auth-shake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  50% {
+    transform: translateX(4px);
+  }
+  75% {
+    transform: translateX(-2px);
+  }
+}
+
+@keyframes live-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(1.4);
+  }
 }
 
 .canvas-surface {
-  background-image: radial-gradient(rgba(148, 163, 184, 0.1) 1px, transparent 1px);
-  background-size: 24px 24px;
+  background-color: #f5f4ec;
+  background-image:
+    linear-gradient(rgba(70, 72, 212, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, transparent 47px, rgba(255, 218, 214, 0.7) 47px, rgba(255, 218, 214, 0.7) 49px, transparent 49px);
+  background-position: 0 0, 0 0;
+  background-size: 100% 32px, 100% 100%;
 }
 
 .cursor-dot {
@@ -65,7 +520,8 @@
   padding: 3px 8px;
   font-size: 11px;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.8);
-  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.88);
+  color: #0f172a;
+  border: 1px solid rgba(226, 232, 240, 0.9);
   white-space: nowrap;
 }

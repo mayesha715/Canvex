@@ -1,18 +1,33 @@
 import { Canvas, Ellipse, FabricObject, Line, Polyline, Rect, Textbox } from 'fabric'
-import { Brush, Circle, Move, RectangleHorizontal, Text } from 'lucide-react'
+import {
+  Brush,
+  Circle,
+  Eraser,
+  Highlighter,
+  Image,
+  Move,
+  PenLine,
+  RectangleHorizontal,
+  Redo2,
+  Sparkles,
+  StickyNote,
+  Text,
+  Undo2,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { getPresenceCount, listElements } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import type { Element, ElementType, PageSummary, User } from '../types'
 
-type Tool = 'select' | 'rect' | 'ellipse' | 'text'
+type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'sticky'
 
 type CanvasObject = FabricObject & {
   elementId?: string
   canvexType?: ElementType
   isRemote?: boolean
   localCreateId?: string
+  pendingSync?: boolean
 }
 
 type CursorState = {
@@ -34,6 +49,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   rect: 'Rectangle',
   ellipse: 'Ellipse',
   text: 'Text',
+  sticky: 'Sticky Note',
 }
 
 const DEFAULT_RECT = { width: 140, height: 90 }
@@ -60,12 +76,20 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const [cursors, setCursors] = useState<Record<string, CursorState>>({})
   const [presenceCount, setPresenceCount] = useState(0)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  const [strokeColor, setStrokeColor] = useState('#0f172a')
+  const [isAiOpen, setIsAiOpen] = useState(false)
+  const [isLoadingPage, setIsLoadingPage] = useState(false)
+  const strokeColorRef = useRef(strokeColor)
 
   const cursorColor = useMemo(() => colorFromId(user.id), [user.id])
 
   useEffect(() => {
     pageRef.current = page
   }, [page])
+
+  useEffect(() => {
+    strokeColorRef.current = strokeColor
+  }, [strokeColor])
 
   const sendMessage = useCallback((payload: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -288,6 +312,46 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     [sendMessage],
   )
 
+  const showToolMessage = useCallback((message: string) => {
+    setStatusMessage(message)
+  }, [])
+
+  const applyStrokeColor = useCallback(
+    (color: string) => {
+      setStrokeColor(color)
+      const canvas = fabricRef.current
+      if (!canvas) return
+      const activeObjects = canvas.getActiveObjects() as CanvasObject[]
+      if (activeObjects.length === 0) return
+      activeObjects.forEach((obj) => {
+        obj.set({ stroke: color })
+        if (obj.type === 'textbox') {
+          obj.set({ fill: color })
+        }
+        if (obj.elementId) {
+          sendElementUpdate(obj)
+        } else {
+          obj.pendingSync = true
+        }
+      })
+      canvas.requestRenderAll()
+    },
+    [sendElementUpdate],
+  )
+
+  const deleteActiveObjects = useCallback(() => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    const activeObjects = canvas.getActiveObjects() as CanvasObject[]
+    if (activeObjects.length === 0) {
+      showToolMessage('Select an element first, then use the eraser.')
+      return
+    }
+    activeObjects.forEach((obj) => canvas.remove(obj))
+    canvas.discardActiveObject()
+    canvas.requestRenderAll()
+  }, [showToolMessage])
+
   useEffect(() => {
     activeToolRef.current = tool
     const canvas = fabricRef.current
@@ -305,7 +369,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       preserveObjectStacking: true,
       selection: true,
     })
-    canvas.backgroundColor = '#f8fafc'
+    canvas.backgroundColor = 'rgba(248, 249, 255, 0)'
     fabricRef.current = canvas
 
     const resize = () => {
@@ -319,6 +383,23 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     resize()
     window.addEventListener('resize', resize)
 
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return
+      const active = document.activeElement
+      if (
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        active?.getAttribute('contenteditable') === 'true'
+      ) {
+        return
+      }
+      if (canvas.getActiveObjects().length === 0) return
+      event.preventDefault()
+      deleteActiveObjects()
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
     canvas.on('mouse:down', (event) => {
       const pointer = canvas.getViewportPoint(event.e)
       if (activeToolRef.current === 'rect') {
@@ -328,12 +409,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           width: DEFAULT_RECT.width,
           height: DEFAULT_RECT.height,
           fill: '#f8fafc',
-          stroke: '#111827',
+          stroke: strokeColorRef.current,
           strokeWidth: 2,
         }) as CanvasObject
         rect.canvexType = 'rect'
         canvas.add(rect)
         canvas.setActiveObject(rect)
+        setTool('select')
       }
       if (activeToolRef.current === 'ellipse') {
         const ellipse = new Ellipse({
@@ -342,26 +424,31 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           rx: DEFAULT_ELLIPSE.rx,
           ry: DEFAULT_ELLIPSE.ry,
           fill: '#fef9c3',
-          stroke: '#111827',
+          stroke: strokeColorRef.current,
           strokeWidth: 2,
         }) as CanvasObject
         ellipse.canvexType = 'ellipse'
         canvas.add(ellipse)
         canvas.setActiveObject(ellipse)
+        setTool('select')
       }
-      if (activeToolRef.current === 'text') {
-        const textbox = new Textbox('Text', {
+      if (activeToolRef.current === 'text' || activeToolRef.current === 'sticky') {
+        const isSticky = activeToolRef.current === 'sticky'
+        const textbox = new Textbox(isSticky ? 'Sticky note' : 'Text', {
           left: pointer.x,
           top: pointer.y,
-          width: 220,
-          fontSize: 20,
-          fill: '#0f172a',
+          width: isSticky ? 180 : 220,
+          fontSize: isSticky ? 18 : 20,
+          fill: strokeColorRef.current,
+          backgroundColor: isSticky ? '#fef3c7' : '',
+          padding: isSticky ? 12 : 0,
         })
         const canvexTextbox = textbox as CanvasObject
-        canvexTextbox.canvexType = 'text'
+        canvexTextbox.canvexType = isSticky ? 'sticky' : 'text'
         canvas.add(canvexTextbox)
         canvas.setActiveObject(canvexTextbox)
         textbox.enterEditing()
+        setTool('select')
       }
     })
 
@@ -438,6 +525,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
     return () => {
       window.removeEventListener('resize', resize)
+      window.removeEventListener('keydown', handleKeyDown)
       timers.forEach((timer) => window.clearTimeout(timer))
       timers.clear()
       if (cursorThrottleRef.current) {
@@ -451,6 +539,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     }
   }, [
     cursorColor,
+    deleteActiveObjects,
     page?.id,
     sendElementCreate,
     sendElementDelete,
@@ -465,12 +554,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     let cancelled = false
 
     const load = async () => {
+      setIsLoadingPage(true)
       try {
         const elements = await listElements(pageId)
         if (cancelled || pageRef.current?.id !== pageId || !fabricRef.current) return
         applyingRemote.current = true
         fabricRef.current.clear()
-        fabricRef.current.backgroundColor = '#f8fafc'
+        fabricRef.current.backgroundColor = 'rgba(248, 249, 255, 0)'
         objectsById.current.clear()
         pendingCreates.current.clear()
         setCursors({})
@@ -482,6 +572,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       } finally {
         if (!cancelled) {
           applyingRemote.current = false
+          setIsLoadingPage(false)
         }
       }
     }
@@ -527,6 +618,10 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
                 obj.elementId = created.id
                 obj.canvexType = created.type
                 objectsById.current.set(created.id, obj)
+                if (obj.pendingSync) {
+                  delete obj.pendingSync
+                  sendElementUpdate(obj)
+                }
               }
             }
             if (message.operation === 'update') {
@@ -614,7 +709,15 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       socket.close()
       wsRef.current = null
     }
-  }, [accessToken, addElementToCanvas, page?.id, removeElementFromCanvas, updateElementOnCanvas, user.id])
+  }, [
+    accessToken,
+    addElementToCanvas,
+    page?.id,
+    removeElementFromCanvas,
+    sendElementUpdate,
+    updateElementOnCanvas,
+    user.id,
+  ])
 
   useEffect(() => {
     const pageId = page?.id
@@ -640,71 +743,207 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
   if (!page) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-slate-500">
-        Select a page to start collaborating.
+      <div className="relative h-full overflow-hidden">
+        <div className="workspace-page-label">
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Active page</p>
+          <h2 className="font-handwriting text-3xl font-semibold text-slate-950">No page selected</h2>
+        </div>
+        <div className="workspace-presence">
+          <div className="workspace-avatar">{user.display_name.slice(0, 2).toUpperCase()}</div>
+          <button type="button" className="workspace-ai-button" onClick={() => setIsAiOpen((prev) => !prev)}>
+            <Sparkles size={15} />
+            <span className="workspace-ai-label">Ask Canvex</span>
+          </button>
+        </div>
+        <div className="workspace-tool-capsule opacity-60">
+          <span className="hidden font-reading-serif text-lg text-slate-700/80 md:inline">Canvex</span>
+          <div className="workspace-tool-divider hidden md:block" />
+          <Move size={16} />
+          <PenLine size={16} />
+          <Brush size={16} />
+          <Highlighter size={16} />
+          <Eraser size={16} />
+          <div className="workspace-tool-divider" />
+          <RectangleHorizontal size={16} />
+          <Circle size={16} />
+          <Text size={16} />
+          <StickyNote size={16} />
+        </div>
+        <div className="canvas-surface absolute inset-0"></div>
+        <div className="relative z-20 flex h-full items-center justify-center text-sm text-slate-500">
+          <div className="max-w-sm rounded-lg border border-dashed border-slate-300 bg-white/65 px-6 py-5 text-center shadow-sm backdrop-blur-sm">
+            <p className="font-reading-serif text-xl text-slate-900">Your notebook is ready.</p>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              Create a channel, then add a page from the notebook index on the left to start drawing.
+            </p>
+          </div>
+        </div>
+        {isAiOpen && (
+          <aside className="workspace-ai-panel">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-reading-serif text-lg text-indigo-700">Ask Canvex</h3>
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">AI notebook assistant</p>
+              </div>
+              <button type="button" className="workspace-ghost-button" onClick={() => setIsAiOpen(false)}>
+                Close
+              </button>
+            </div>
+            <p className="mt-5 rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 text-sm leading-6 text-slate-600">
+              Create a page first, then I can help summarize, explain, and organize your canvas.
+            </p>
+          </aside>
+        )}
       </div>
     )
   }
 
+  const isConnected = connectionState === 'connected'
+
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/60 px-6 py-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Active page</p>
-          <h2 className="text-xl font-semibold text-white">{page.title}</h2>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="chip">{presenceCount} online</span>
-          <span className="chip">
-            {connectionState === 'connected' ? 'Live sync' : connectionState === 'connecting' ? 'Connecting…' : 'Offline'}
-          </span>
-        </div>
+    <div className="relative h-full overflow-hidden">
+      <div className="workspace-page-label">
+        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Active page</p>
+        <h2 className="font-handwriting text-3xl font-semibold text-slate-950">{page.title}</h2>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800/60 px-6 py-3">
+      <div className="workspace-presence">
+        <div className="flex -space-x-2">
+          <div className="workspace-avatar">{user.display_name.slice(0, 2).toUpperCase()}</div>
+          {presenceCount > 1 && <div className="workspace-avatar muted">+{presenceCount - 1}</div>}
+        </div>
+        <span className={`workspace-live-chip ${isConnected ? 'online' : ''}`}>
+          {isConnected ? 'Live' : connectionState === 'connecting' ? 'Connecting' : 'Offline'}
+        </span>
+        <button type="button" className="workspace-ai-button" onClick={() => setIsAiOpen((prev) => !prev)}>
+          <Sparkles size={15} />
+          <span className="workspace-ai-label">Ask Canvex</span>
+        </button>
+      </div>
+
+      <div className="workspace-tool-capsule">
+        <span className="hidden font-reading-serif text-lg text-slate-700/80 md:inline">Canvex</span>
+        <div className="workspace-tool-divider hidden md:block" />
         <button
           type="button"
-          className={`toolbar-button ${tool === 'select' ? 'active' : ''}`}
+          className={`workspace-tool-button ${tool === 'select' ? 'active' : ''}`}
           onClick={() => setTool('select')}
+          title={TOOL_LABELS.select}
         >
           <Move size={16} />
-          {TOOL_LABELS.select}
+        </button>
+        <div className="workspace-tool-divider" />
+        <button
+          type="button"
+          className="workspace-tool-button ghost"
+          title="Pen"
+          onClick={() => showToolMessage('Freehand pen is planned for the drawing phase. Use shapes and text for now.')}
+        >
+          <PenLine size={16} />
         </button>
         <button
           type="button"
-          className={`toolbar-button ${tool === 'rect' ? 'active' : ''}`}
+          className="workspace-tool-button ghost"
+          title="Pencil"
+          onClick={() => showToolMessage('Pencil mode is coming soon.')}
+        >
+          <Brush size={16} />
+        </button>
+        <button
+          type="button"
+          className="workspace-tool-button ghost"
+          title="Highlighter"
+          onClick={() => showToolMessage('Highlighter mode is coming soon.')}
+        >
+          <Highlighter size={16} />
+        </button>
+        <button type="button" className="workspace-tool-button ghost" title="Eraser" onClick={deleteActiveObjects}>
+          <Eraser size={16} />
+        </button>
+        <div className="workspace-tool-divider" />
+        <button
+          type="button"
+          className={`workspace-tool-button ${tool === 'rect' ? 'active' : ''}`}
           onClick={() => setTool('rect')}
+          title={TOOL_LABELS.rect}
         >
           <RectangleHorizontal size={16} />
-          {TOOL_LABELS.rect}
         </button>
         <button
           type="button"
-          className={`toolbar-button ${tool === 'ellipse' ? 'active' : ''}`}
+          className={`workspace-tool-button ${tool === 'ellipse' ? 'active' : ''}`}
           onClick={() => setTool('ellipse')}
+          title={TOOL_LABELS.ellipse}
         >
           <Circle size={16} />
-          {TOOL_LABELS.ellipse}
         </button>
         <button
           type="button"
-          className={`toolbar-button ${tool === 'text' ? 'active' : ''}`}
+          className={`workspace-tool-button ${tool === 'text' ? 'active' : ''}`}
           onClick={() => setTool('text')}
+          title={TOOL_LABELS.text}
         >
           <Text size={16} />
-          {TOOL_LABELS.text}
         </button>
-        <button type="button" className="toolbar-button">
-          <Brush size={16} />
-          Locks on edit
+        <button
+          type="button"
+          className={`workspace-tool-button ${tool === 'sticky' ? 'active' : 'ghost'}`}
+          title="Sticky Note"
+          onClick={() => {
+            setTool('sticky')
+            showToolMessage('Click the canvas to place a note.')
+          }}
+        >
+          <StickyNote size={16} />
+        </button>
+        <button
+          type="button"
+          className="workspace-tool-button ghost"
+          title="Image"
+          onClick={() => showToolMessage('Image uploads are coming soon.')}
+        >
+          <Image size={16} />
+        </button>
+        <div className="workspace-tool-divider" />
+        <div className="workspace-swatches">
+          {['#0f172a', '#2563eb', '#ef4444', '#22c55e', '#facc15', '#818cf8'].map((color) => (
+            <button
+              key={color}
+              type="button"
+              className={`workspace-swatch ${strokeColor === color ? 'active' : ''}`}
+              style={{ backgroundColor: color }}
+              onClick={() => applyStrokeColor(color)}
+              title={`Use ${color}`}
+            />
+          ))}
+        </div>
+        <div className="workspace-tool-divider hidden sm:block" />
+        <button
+          type="button"
+          className="workspace-tool-button ghost hidden sm:flex"
+          title="Undo"
+          onClick={() => showToolMessage('Undo is coming soon.')}
+        >
+          <Undo2 size={16} />
+        </button>
+        <button
+          type="button"
+          className="workspace-tool-button ghost hidden sm:flex"
+          title="Redo"
+          onClick={() => showToolMessage('Redo is coming soon.')}
+        >
+          <Redo2 size={16} />
         </button>
       </div>
 
       {statusMessage && (
-        <div className="bg-rose-500/20 px-6 py-2 text-sm text-rose-200">{statusMessage}</div>
+        <div className="workspace-status-message">{statusMessage}</div>
+      )}
+      {isLoadingPage && (
+        <div className="workspace-status-message">Loading page...</div>
       )}
 
-      <div ref={containerRef} className="relative flex-1 overflow-hidden bg-slate-900/40">
+      <div ref={containerRef} className="relative h-full overflow-hidden">
         <div className="canvas-surface absolute inset-0"></div>
         <canvas ref={canvasRef} className="relative z-10 h-full w-full"></canvas>
         {Object.values(cursors).map((cursor) => (
@@ -719,6 +958,33 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           </div>
         ))}
       </div>
+      {isAiOpen && (
+        <aside className="workspace-ai-panel">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-reading-serif text-lg text-indigo-700">Ask Canvex</h3>
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">AI notebook assistant</p>
+            </div>
+            <button type="button" className="workspace-ghost-button" onClick={() => setIsAiOpen(false)}>
+              Close
+            </button>
+          </div>
+          <div className="mt-5 space-y-3 text-sm leading-6 text-slate-600">
+            <p className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3">
+              I can help explain selected notes, summarize this page, or turn sketches into structured study points.
+            </p>
+            <input className="workspace-input" placeholder="Ask about this canvas..." />
+            <button
+              type="button"
+              className="workspace-action-button w-full justify-center"
+              onClick={() => showToolMessage('AI features are coming in Phase 9.')}
+            >
+              <Sparkles size={15} />
+              Ask
+            </button>
+          </div>
+        </aside>
+      )}
     </div>
   )
 }

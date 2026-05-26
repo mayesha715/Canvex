@@ -1,4 +1,4 @@
-import { Plus, SquarePen } from 'lucide-react'
+import { BookOpen, Folder, Plus, SquarePen, UserRound } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import type { ChannelDetail, ChannelListItem, PageSummary, User } from '../types'
@@ -37,23 +37,28 @@ const Sidebar = ({
   }, [selectedChannel])
 
   return (
-    <aside className="glass-panel flex h-full w-80 flex-col gap-6 border-r border-slate-800/80 p-6">
+    <aside className="workspace-sidebar flex h-full w-80 flex-col gap-6 p-6">
       <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Workspace</p>
-        <h1 className="mt-2 text-2xl font-semibold text-white">Canvex</h1>
-        <p className="mt-1 text-sm text-slate-400">Realtime SQL whiteboard</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">Notebook Index</p>
+        <h1 className="mt-2 font-reading-serif text-3xl uppercase tracking-[0.16em] text-indigo-950/20">Canvex</h1>
+        <p className="mt-1 text-sm text-slate-500">Realtime research pages</p>
       </div>
 
-      <div className="rounded-2xl border border-slate-800/70 bg-slate-900/70 p-4">
+      <div className="workspace-user-strip">
         <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-white">{user.display_name}</p>
-            <p className="text-xs text-slate-400">{user.email}</p>
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700">
+              <UserRound size={17} />
+            </div>
+            <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-slate-900">{user.display_name}</p>
+            <p className="truncate text-xs text-slate-400">{user.email}</p>
+            </div>
           </div>
-          <span className="chip">{channelRole}</span>
+          <span className="workspace-chip">{channelRole}</span>
         </div>
         {selectedChannel && (
-          <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+          <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
             <span>{membersCount} members</span>
             <span>•</span>
             <span>{selectedChannel.pages.length} pages</span>
@@ -62,7 +67,8 @@ const Sidebar = ({
       </div>
 
       <section>
-        <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">
+          <Folder size={14} />
           Channels
         </div>
         <div className="mt-3 space-y-2">
@@ -71,10 +77,10 @@ const Sidebar = ({
               key={channel.id}
               type="button"
               onClick={() => onSelectChannel(channel.id)}
-              className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left text-sm ${
+              className={`workspace-list-item ${
                 selectedChannel?.id === channel.id
-                  ? 'border-indigo-400/60 bg-indigo-500/10 text-white'
-                  : 'border-slate-800/70 bg-slate-900/60 text-slate-300 hover:border-slate-700'
+                  ? 'active'
+                  : ''
               }`}
             >
               <span className="font-medium">{channel.name}</span>
@@ -85,13 +91,13 @@ const Sidebar = ({
 
         <div className="mt-4 space-y-2">
           <input
-            className="form-input"
+            className="workspace-input"
             placeholder="New channel"
             value={newChannelName}
             onChange={(event) => setNewChannelName(event.target.value)}
           />
           <input
-            className="form-input"
+            className="workspace-input"
             placeholder="Description (optional)"
             value={newChannelDescription}
             onChange={(event) => setNewChannelDescription(event.target.value)}
@@ -105,7 +111,7 @@ const Sidebar = ({
               setNewChannelName('')
               setNewChannelDescription('')
             }}
-            className="toolbar-button w-full justify-center"
+            className="workspace-action-button w-full justify-center"
           >
             <Plus size={16} />
             Create channel
@@ -114,7 +120,8 @@ const Sidebar = ({
       </section>
 
       <section className="flex-1">
-        <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">
+          <BookOpen size={14} />
           Pages
         </div>
         <div className="mt-3 space-y-2">
@@ -126,10 +133,10 @@ const Sidebar = ({
               key={page.id}
               type="button"
               onClick={() => onSelectPage(page.id)}
-              className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left text-sm ${
+              className={`workspace-list-item ${
                 selectedPage?.id === page.id
-                  ? 'border-indigo-400/60 bg-indigo-500/10 text-white'
-                  : 'border-slate-800/70 bg-slate-900/60 text-slate-300 hover:border-slate-700'
+                  ? 'active'
+                  : ''
               }`}
             >
               <span className="font-medium">{page.title}</span>
@@ -141,7 +148,7 @@ const Sidebar = ({
         {selectedChannel && (
           <div className="mt-4 space-y-2">
             <input
-              className="form-input"
+              className="workspace-input"
               placeholder="New page title"
               value={newPageTitle}
               onChange={(event) => setNewPageTitle(event.target.value)}
@@ -153,7 +160,7 @@ const Sidebar = ({
                 onCreatePage(newPageTitle.trim())
                 setNewPageTitle('')
               }}
-              className="toolbar-button w-full justify-center"
+              className="workspace-action-button w-full justify-center"
             >
               <Plus size={16} />
               Create page
