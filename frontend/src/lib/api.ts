@@ -47,8 +47,11 @@ export const register = async (
 }
 
 export const logout = async (refreshToken: string) => {
-  await apiClient.post('/auth/logout', { refresh_token: refreshToken })
-  clearSession()
+  try {
+    await apiClient.post('/auth/logout', { refresh_token: refreshToken })
+  } finally {
+    clearSession()
+  }
 }
 
 export const getMe = async (overrideToken?: string): Promise<User> => {

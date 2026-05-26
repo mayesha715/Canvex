@@ -14,5 +14,3 @@ pgvector
 pillow
 httpx
 python-multipart
-y-py
-ypy-websocket

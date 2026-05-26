@@ -113,6 +113,7 @@ def main() -> None:
                         "type": "element:op",
                         "payload": {
                             "operation": "create",
+                            "client_operation_id": "owner-create-1",
                             "element": {
                                 "type": "text",
                                 "transform": {"x": 10, "y": 20, "scaleX": 1, "scaleY": 1, "rotation": 0},
@@ -127,6 +128,8 @@ def main() -> None:
                 editor_broadcast = editor_ws.receive_json()
                 if owner_ack["type"] != "element:ack" or owner_ack["operation"] != "create":
                     raise AssertionError(f"unexpected owner create ack: {owner_ack}")
+                if owner_ack["client_operation_id"] != "owner-create-1":
+                    raise AssertionError(f"create ack did not preserve client operation id: {owner_ack}")
                 if editor_broadcast["type"] != "element:op" or editor_broadcast["operation"] != "create":
                     raise AssertionError(f"unexpected editor create broadcast: {editor_broadcast}")
                 element_id = owner_ack["payload"]["id"]

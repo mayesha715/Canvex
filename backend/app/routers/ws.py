@@ -213,7 +213,10 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
                             operation_payload=payload,
                         )
                     event = {"type": "element:op", "operation": operation, "payload": element_data}
-                    await websocket.send_json({"type": "element:ack", "operation": operation, "payload": element_data})
+                    ack = {"type": "element:ack", "operation": operation, "payload": element_data}
+                    if payload.get("client_operation_id") is not None:
+                        ack["client_operation_id"] = payload["client_operation_id"]
+                    await websocket.send_json(ack)
                     await manager.broadcast(page_id, event, exclude=websocket)
                 except Exception as exc:
                     await try_send_error(websocket, exc)

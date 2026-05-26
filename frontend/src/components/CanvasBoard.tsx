@@ -12,6 +12,7 @@ type CanvasObject = FabricObject & {
   elementId?: string
   canvexType?: ElementType
   isRemote?: boolean
+  localCreateId?: string
 }
 
 type CursorState = {
@@ -45,7 +46,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const fabricRef = useRef<Canvas | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const objectsById = useRef<Map<string, CanvasObject>>(new Map())
-  const pendingCreates = useRef<CanvasObject[]>([])
+  const pendingCreates = useRef<Map<string, CanvasObject>>(new Map())
   const textUpdateTimers = useRef<Map<string, number>>(new Map())
   const applyingRemote = useRef(false)
   const activeToolRef = useRef<Tool>('select')
@@ -233,47 +234,57 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
   const sendElementCreate = useCallback(
     (obj: CanvasObject) => {
-    const elementPayload = {
-      type: resolveElementType(obj),
-      transform: toTransform(obj),
-      style: toStyle(obj),
-      content: toContent(obj),
-      vector_clock: nextVectorClock(),
-    }
-    sendMessage({ type: 'element:op', payload: { operation: 'create', element: elementPayload } })
+      const clientOperationId = crypto.randomUUID()
+      const elementPayload = {
+        type: resolveElementType(obj),
+        transform: toTransform(obj),
+        style: toStyle(obj),
+        content: toContent(obj),
+      }
+      obj.localCreateId = clientOperationId
+      pendingCreates.current.set(clientOperationId, obj)
+      sendMessage({
+        type: 'element:op',
+        payload: {
+          operation: 'create',
+          client_operation_id: clientOperationId,
+          vector_clock: nextVectorClock(),
+          element: elementPayload,
+        },
+      })
     },
     [nextVectorClock, resolveElementType, sendMessage, toContent, toStyle, toTransform],
   )
 
   const sendElementUpdate = useCallback(
     (obj: CanvasObject) => {
-    if (!obj.elementId) return
-    sendMessage({
-      type: 'element:op',
-      payload: {
-        operation: 'update',
-        element_id: obj.elementId,
-        transform: toTransform(obj),
-        style: toStyle(obj),
-        content: toContent(obj),
-        vector_clock: nextVectorClock(),
-      },
-    })
+      if (!obj.elementId) return
+      sendMessage({
+        type: 'element:op',
+        payload: {
+          operation: 'update',
+          element_id: obj.elementId,
+          transform: toTransform(obj),
+          style: toStyle(obj),
+          content: toContent(obj),
+          vector_clock: nextVectorClock(),
+        },
+      })
     },
     [nextVectorClock, sendMessage, toContent, toStyle, toTransform],
   )
 
   const sendElementDelete = useCallback(
     (obj: CanvasObject) => {
-    if (!obj.elementId) return
-    sendMessage({ type: 'element:op', payload: { operation: 'delete', element_id: obj.elementId } })
+      if (!obj.elementId) return
+      sendMessage({ type: 'element:op', payload: { operation: 'delete', element_id: obj.elementId } })
     },
     [sendMessage],
   )
 
   const sendLock = useCallback(
     (elementId: string) => {
-    sendMessage({ type: 'element:lock', payload: { element_id: elementId } })
+      sendMessage({ type: 'element:lock', payload: { element_id: elementId } })
     },
     [sendMessage],
   )
@@ -291,8 +302,10 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   }, [tool])
 
   useEffect(() => {
-    if (!canvasRef.current || !containerRef.current) return
+    if (!page?.id || !canvasRef.current || !containerRef.current) return
     const timers = textUpdateTimers.current
+    const objectMap = objectsById.current
+    const pendingCreateMap = pendingCreates.current
 
     const canvas = new Canvas(canvasRef.current, {
       preserveObjectStacking: true,
@@ -386,7 +399,6 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       const obj = event.target as CanvasObject | undefined
       if (!obj || applyingRemote.current || obj.isRemote) return
       if (!obj.elementId) {
-        pendingCreates.current.push(obj)
         sendElementCreate(obj)
       }
     })
@@ -434,10 +446,18 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       window.removeEventListener('resize', resize)
       timers.forEach((timer) => window.clearTimeout(timer))
       timers.clear()
+      if (cursorThrottleRef.current) {
+        window.clearTimeout(cursorThrottleRef.current)
+        cursorThrottleRef.current = null
+      }
+      objectMap.clear()
+      pendingCreateMap.clear()
+      fabricRef.current = null
       canvas.dispose()
     }
   }, [
     cursorColor,
+    page?.id,
     sendElementCreate,
     sendElementDelete,
     sendElementUpdate,
@@ -457,7 +477,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           fabricRef.current.backgroundColor = '#f8fafc'
         }
         objectsById.current.clear()
-        pendingCreates.current = []
+        pendingCreates.current.clear()
         setCursors({})
         elements.filter((element) => !element.is_deleted).forEach(addElementToCanvas)
         applyingRemote.current = false
@@ -493,8 +513,12 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           case 'element:ack': {
             if (message.operation === 'create') {
               const created = message.payload as Element
-              const obj = pendingCreates.current.shift()
+              const clientOperationId =
+                typeof message.client_operation_id === 'string' ? message.client_operation_id : null
+              const obj = clientOperationId ? pendingCreates.current.get(clientOperationId) : undefined
               if (obj) {
+                pendingCreates.current.delete(clientOperationId)
+                delete obj.localCreateId
                 obj.elementId = created.id
                 obj.canvexType = created.type
                 objectsById.current.set(created.id, obj)
