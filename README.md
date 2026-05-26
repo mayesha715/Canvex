@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 5 is implemented end-to-end with backend realtime transport and a collaborative frontend:
+Phase 6 is implemented with offline-first canvas persistence and reconnect sync:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -29,6 +29,12 @@ Phase 5 is implemented end-to-end with backend realtime transport and a collabor
 - React + Fabric.js canvas UI with select, rectangle, ellipse, and text tools
 - WebSocket client for element ops, locks, and live cursors
 - Channel/page shell with authentication flow
+- Yjs document per whiteboard page
+- IndexedDB persistence for local page element state
+- Offline operation queue for create/update/delete element operations
+- Online/offline detection with a visible workspace status chip
+- Reconnect replay of queued operations through the existing authenticated WebSocket
+- `protocol: "canvas"` marker on realtime messages for future protocol expansion
 
 ## Local Full-Stack Setup
 
@@ -116,8 +122,10 @@ npm run lint
 npm run build
 ```
 
-## Phase 5 Notes
+## Phase 6 Notes
 
 - Element create/update/delete operations are persisted through the backend WebSocket route and still write to the append-only event log.
 - Create acknowledgements use a client operation id so rapid local creates are matched to the correct Fabric object.
-- The pen/freehand tool is intentionally hidden for now because full Fabric path serialization belongs with the later CRDT/offline work.
+- The canvas stores a local Yjs `elements` map in IndexedDB for each page, so cached elements can be restored when the network is unavailable.
+- While offline, element operations are queued locally. When the browser reconnects and the page WebSocket opens, queued operations are replayed with their original vector clocks.
+- The installed `y-websocket` dependency is reserved for a later binary Yjs transport. The current Phase 6 implementation keeps the existing JSON WebSocket contract and adds a `protocol` field so protocol routing can evolve without breaking canvas messages.

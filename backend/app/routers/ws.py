@@ -122,6 +122,7 @@ async def apply_element_operation(
         return "update", element_payload(element)
 
     if operation == "delete":
+        # TODO(phase-7): thread vector_clock into delete event logging once delete concurrency is modeled.
         await delete_element_state(db, element=element, actor_id=user_id, role=membership.role)
         await db.commit()
         return "delete", {"id": str(element.id), "page_id": str(page_id), "is_deleted": True}
@@ -169,6 +170,10 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
     try:
         while True:
             message = await websocket.receive_json()
+            protocol = message.get("protocol", "canvas")
+            if protocol != "canvas":
+                await websocket.send_json({"type": "error", "status": 400, "detail": "Unsupported websocket protocol"})
+                continue
             message_type = message.get("type")
             payload = dict(message.get("payload") or {})
 

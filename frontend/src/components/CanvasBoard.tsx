@@ -1,4 +1,6 @@
 import { Canvas, Ellipse, FabricObject, Line, Polyline, Rect, Textbox } from 'fabric'
+import * as Y from 'yjs'
+import { IndexeddbPersistence } from 'y-indexeddb'
 import {
   Brush,
   Circle,
@@ -18,6 +20,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { getPresenceCount, listElements } from '../lib/api'
 import { colorFromId } from '../lib/colors'
+import {
+  getClientId,
+  loadOfflineQueue,
+  saveOfflineQueue,
+  type OfflineElementState,
+  type OfflineOperationType,
+  type OfflineQueueItem,
+  type VectorClock,
+} from '../lib/offlineSync'
 import type { Element, ElementType, PageSummary, User } from '../types'
 
 type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'sticky'
@@ -27,6 +38,7 @@ type CanvasObject = FabricObject & {
   canvexType?: ElementType
   isRemote?: boolean
   localCreateId?: string
+  syncLocalId?: string
   pendingSync?: boolean
 }
 
@@ -63,11 +75,17 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const objectsById = useRef<Map<string, CanvasObject>>(new Map())
   const pendingCreates = useRef<Map<string, CanvasObject>>(new Map())
   const textUpdateTimers = useRef<Map<string, number>>(new Map())
+  const yDocRef = useRef<Y.Doc | null>(null)
+  const yElementsRef = useRef<Y.Map<OfflineElementState> | null>(null)
+  const yPersistenceRef = useRef<IndexeddbPersistence | null>(null)
+  const offlineQueueRef = useRef<OfflineQueueItem[]>([])
+  const restLoadSucceededRef = useRef(false)
+  const renderCachedElementsRef = useRef<() => number>(() => 0)
   const applyingRemote = useRef(false)
   const activeToolRef = useRef<Tool>('select')
   const pageRef = useRef<PageSummary | null>(null)
   const seqRef = useRef(0)
-  const clientIdRef = useRef(crypto.randomUUID())
+  const clientIdRef = useRef(getClientId())
   const cursorThrottleRef = useRef<number | null>(null)
   const [tool, setTool] = useState<Tool>('select')
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected'>(
@@ -79,7 +97,10 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const [strokeColor, setStrokeColor] = useState('#0f172a')
   const [isAiOpen, setIsAiOpen] = useState(false)
   const [isLoadingPage, setIsLoadingPage] = useState(false)
+  const [isOffline, setIsOffline] = useState(!navigator.onLine)
+  const [queuedOpsCount, setQueuedOpsCount] = useState(0)
   const strokeColorRef = useRef(strokeColor)
+  const isOfflineRef = useRef(isOffline)
 
   const cursorColor = useMemo(() => colorFromId(user.id), [user.id])
 
@@ -91,9 +112,65 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     strokeColorRef.current = strokeColor
   }, [strokeColor])
 
+  useEffect(() => {
+    isOfflineRef.current = isOffline
+  }, [isOffline])
+
+  useEffect(() => {
+    const updateOnlineState = () => setIsOffline(!navigator.onLine)
+    window.addEventListener('online', updateOnlineState)
+    window.addEventListener('offline', updateOnlineState)
+    updateOnlineState()
+    return () => {
+      window.removeEventListener('online', updateOnlineState)
+      window.removeEventListener('offline', updateOnlineState)
+    }
+  }, [])
+
+  useEffect(() => {
+    const pageId = page?.id
+    yPersistenceRef.current?.destroy()
+    yDocRef.current?.destroy()
+    yDocRef.current = null
+    yElementsRef.current = null
+    yPersistenceRef.current = null
+    offlineQueueRef.current = []
+    restLoadSucceededRef.current = false
+    setQueuedOpsCount(0)
+
+    if (!pageId) return
+
+    const doc = new Y.Doc()
+    const elements = doc.getMap<OfflineElementState>('elements')
+    const persistence = new IndexeddbPersistence(`canvex.page.${pageId}`, doc)
+    const queue = loadOfflineQueue(pageId)
+
+    yDocRef.current = doc
+    yElementsRef.current = elements
+    yPersistenceRef.current = persistence
+    offlineQueueRef.current = queue
+    setQueuedOpsCount(queue.length)
+
+    persistence.on('synced', () => {
+      if (!restLoadSucceededRef.current) {
+        renderCachedElementsRef.current()
+      }
+    })
+
+    return () => {
+      persistence.destroy()
+      doc.destroy()
+      if (yDocRef.current === doc) {
+        yDocRef.current = null
+        yElementsRef.current = null
+        yPersistenceRef.current = null
+      }
+    }
+  }, [page?.id])
+
   const sendMessage = useCallback((payload: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(payload))
+      wsRef.current.send(JSON.stringify({ protocol: 'canvas', ...payload }))
     }
   }, [])
 
@@ -147,6 +224,107 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         return 'rect'
     }
   }, [])
+
+  const canSendRealtime = useCallback(
+    () => !isOfflineRef.current && wsRef.current?.readyState === WebSocket.OPEN,
+    [],
+  )
+
+  const ensureLocalId = useCallback((obj: CanvasObject) => {
+    if (obj.syncLocalId) return obj.syncLocalId
+    const localId = obj.elementId ?? obj.localCreateId ?? crypto.randomUUID()
+    obj.syncLocalId = localId
+    return localId
+  }, [])
+
+  const saveQueue = useCallback((queue: OfflineQueueItem[]) => {
+    const pageId = pageRef.current?.id
+    offlineQueueRef.current = queue
+    setQueuedOpsCount(queue.length)
+    if (pageId) {
+      saveOfflineQueue(pageId, queue)
+    }
+  }, [])
+
+  const writeElementToYjs = useCallback(
+    (obj: CanvasObject, isDeleted = false) => {
+      const pageId = pageRef.current?.id
+      const elements = yElementsRef.current
+      if (!pageId || !elements) return null
+      const localId = ensureLocalId(obj)
+      const state: OfflineElementState = {
+        local_id: localId,
+        server_id: obj.elementId,
+        page_id: pageId,
+        type: resolveElementType(obj),
+        transform: toTransform(obj),
+        style: toStyle(obj),
+        content: toContent(obj),
+        is_deleted: isDeleted,
+        updated_at: new Date().toISOString(),
+      }
+      elements.set(localId, state)
+      return state
+    },
+    [ensureLocalId, resolveElementType, toContent, toStyle, toTransform],
+  )
+
+  const writeServerElementToYjs = useCallback((element: Element, localId = element.id) => {
+    yElementsRef.current?.set(localId, {
+      local_id: localId,
+      server_id: element.id,
+      page_id: element.page_id,
+      type: element.type,
+      transform: element.transform,
+      style: element.style,
+      content: element.content,
+      is_deleted: element.is_deleted,
+      updated_at: element.updated_at,
+    })
+  }, [])
+
+  const queueOfflineOperation = useCallback(
+    (
+      operation: OfflineOperationType,
+      obj: CanvasObject,
+      vectorClock: VectorClock,
+      clientOperationId: string = crypto.randomUUID(),
+    ) => {
+      const localId = ensureLocalId(obj)
+      const existingQueue = offlineQueueRef.current
+      let nextQueue = existingQueue.filter((item) => {
+        if (item.local_id !== localId) return true
+        if (operation === 'update') return item.operation !== 'update'
+        if (operation === 'delete') return false
+        return true
+      })
+
+      const hasCreate = nextQueue.some((item) => item.local_id === localId && item.operation === 'create')
+
+      if (operation === 'delete' && hasCreate && !obj.elementId) {
+        nextQueue = nextQueue.filter((item) => item.local_id !== localId)
+        saveQueue(nextQueue)
+        return
+      }
+
+      if (operation === 'update' && hasCreate) {
+        saveQueue(nextQueue)
+        return
+      }
+
+      nextQueue.push({
+        id: crypto.randomUUID(),
+        client_operation_id: clientOperationId,
+        operation,
+        local_id: localId,
+        element_id: obj.elementId,
+        vector_clock: vectorClock,
+        queued_at: new Date().toISOString(),
+      })
+      saveQueue(nextQueue)
+    },
+    [ensureLocalId, saveQueue],
+  )
 
   const makeObject = useCallback((element: Element): CanvasObject | null => {
     const base = {
@@ -214,6 +392,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     const obj = makeObject(element)
     if (!obj) return
     obj.elementId = element.id
+    obj.syncLocalId = element.id
     obj.canvexType = element.type
     obj.isRemote = true
     applyingRemote.current = true
@@ -221,7 +400,54 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     applyingRemote.current = false
     obj.isRemote = false
     objectsById.current.set(element.id, obj)
+    writeServerElementToYjs(element)
+  }, [makeObject, writeServerElementToYjs])
+
+  const addCachedElementToCanvas = useCallback((state: OfflineElementState) => {
+    if (!fabricRef.current || state.is_deleted) return
+    const element: Element = {
+      id: state.server_id ?? state.local_id,
+      page_id: state.page_id,
+      type: state.type,
+      transform: state.transform,
+      style: state.style,
+      content: state.content,
+      is_deleted: state.is_deleted,
+      created_at: state.updated_at,
+      updated_at: state.updated_at,
+    }
+    const obj = makeObject(element)
+    if (!obj) return
+    obj.syncLocalId = state.local_id
+    obj.elementId = state.server_id
+    obj.canvexType = state.type
+    obj.localCreateId = state.server_id ? undefined : state.local_id
+    obj.isRemote = true
+    applyingRemote.current = true
+    fabricRef.current.add(obj)
+    applyingRemote.current = false
+    obj.isRemote = false
+    if (state.server_id) {
+      objectsById.current.set(state.server_id, obj)
+    }
   }, [makeObject])
+
+  const renderCachedElements = useCallback(() => {
+    const cachedElements = Array.from(yElementsRef.current?.values() ?? []).filter((element) => !element.is_deleted)
+    if (!fabricRef.current) return cachedElements.length
+    applyingRemote.current = true
+    fabricRef.current.clear()
+    fabricRef.current.backgroundColor = 'rgba(245, 244, 236, 0)'
+    objectsById.current.clear()
+    pendingCreates.current.clear()
+    cachedElements.forEach(addCachedElementToCanvas)
+    applyingRemote.current = false
+    return cachedElements.length
+  }, [addCachedElementToCanvas])
+
+  useEffect(() => {
+    renderCachedElementsRef.current = renderCachedElements
+  }, [renderCachedElements])
 
   const updateElementOnCanvas = useCallback((element: Element) => {
     const obj = objectsById.current.get(element.id)
@@ -244,7 +470,8 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     }
     obj.setCoords()
     fabricRef.current?.renderAll()
-  }, [addElementToCanvas])
+    writeServerElementToYjs(element, obj.syncLocalId ?? element.id)
+  }, [addElementToCanvas, writeServerElementToYjs])
 
   const removeElementFromCanvas = useCallback((elementId: string) => {
     const obj = objectsById.current.get(elementId)
@@ -253,36 +480,68 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     fabricRef.current.remove(obj)
     applyingRemote.current = false
     objectsById.current.delete(elementId)
+    const localId = obj.syncLocalId ?? elementId
+    const existing = yElementsRef.current?.get(localId)
+    if (existing) {
+      yElementsRef.current?.set(localId, { ...existing, is_deleted: true, updated_at: new Date().toISOString() })
+    }
   }, [])
 
   const sendElementCreate = useCallback(
     (obj: CanvasObject) => {
-      const clientOperationId = crypto.randomUUID()
+      const clientOperationId = obj.localCreateId ?? crypto.randomUUID()
       const elementPayload = {
         type: resolveElementType(obj),
         transform: toTransform(obj),
         style: toStyle(obj),
         content: toContent(obj),
       }
+      ensureLocalId(obj)
       obj.localCreateId = clientOperationId
+      writeElementToYjs(obj)
       pendingCreates.current.set(clientOperationId, obj)
-      sendMessage({
+      const vectorClock = nextVectorClock()
+      const message = {
         type: 'element:op',
         payload: {
           operation: 'create',
           client_operation_id: clientOperationId,
-          vector_clock: nextVectorClock(),
+          vector_clock: vectorClock,
           element: elementPayload,
         },
-      })
+      }
+      if (canSendRealtime()) {
+        sendMessage(message)
+      } else {
+        queueOfflineOperation('create', obj, vectorClock, clientOperationId)
+      }
     },
-    [nextVectorClock, resolveElementType, sendMessage, toContent, toStyle, toTransform],
+    [
+      canSendRealtime,
+      ensureLocalId,
+      nextVectorClock,
+      queueOfflineOperation,
+      resolveElementType,
+      sendMessage,
+      toContent,
+      toStyle,
+      toTransform,
+      writeElementToYjs,
+    ],
   )
 
   const sendElementUpdate = useCallback(
     (obj: CanvasObject) => {
-      if (!obj.elementId) return
-      sendMessage({
+      writeElementToYjs(obj)
+      const vectorClock = nextVectorClock()
+      if (!obj.elementId) {
+        obj.pendingSync = true
+        if (!canSendRealtime()) {
+          queueOfflineOperation('update', obj, vectorClock)
+        }
+        return
+      }
+      const message = {
         type: 'element:op',
         payload: {
           operation: 'update',
@@ -290,19 +549,37 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           transform: toTransform(obj),
           style: toStyle(obj),
           content: toContent(obj),
-          vector_clock: nextVectorClock(),
+          vector_clock: vectorClock,
         },
-      })
+      }
+      if (canSendRealtime()) {
+        sendMessage(message)
+      } else {
+        queueOfflineOperation('update', obj, vectorClock)
+      }
     },
-    [nextVectorClock, sendMessage, toContent, toStyle, toTransform],
+    [canSendRealtime, nextVectorClock, queueOfflineOperation, sendMessage, toContent, toStyle, toTransform, writeElementToYjs],
   )
 
   const sendElementDelete = useCallback(
     (obj: CanvasObject) => {
-      if (!obj.elementId) return
-      sendMessage({ type: 'element:op', payload: { operation: 'delete', element_id: obj.elementId } })
+      const vectorClock = nextVectorClock()
+      writeElementToYjs(obj, true)
+      if (!obj.elementId) {
+        queueOfflineOperation('delete', obj, vectorClock)
+        return
+      }
+      const message = {
+        type: 'element:op',
+        payload: { operation: 'delete', element_id: obj.elementId, vector_clock: vectorClock },
+      }
+      if (canSendRealtime()) {
+        sendMessage(message)
+      } else {
+        queueOfflineOperation('delete', obj, vectorClock)
+      }
     },
-    [sendMessage],
+    [canSendRealtime, nextVectorClock, queueOfflineOperation, sendMessage, writeElementToYjs],
   )
 
   const sendLock = useCallback(
@@ -311,6 +588,76 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     },
     [sendMessage],
   )
+
+  const flushOfflineQueue = useCallback(() => {
+    const pageId = pageRef.current?.id
+    const elements = yElementsRef.current
+    if (!pageId || !elements || !canSendRealtime() || offlineQueueRef.current.length === 0) return
+
+    const queue = [...offlineQueueRef.current]
+    const sentItemIds = new Set<string>()
+    queue.forEach((item) => {
+      const state = elements.get(item.local_id)
+      if (item.operation === 'create') {
+        if (!state || state.is_deleted) return
+        const obj = fabricRef.current
+          ?.getObjects()
+          .find((candidate) => (candidate as CanvasObject).syncLocalId === item.local_id) as CanvasObject | undefined
+        if (obj) {
+          obj.localCreateId = item.client_operation_id
+          pendingCreates.current.set(item.client_operation_id, obj)
+        }
+        sendMessage({
+          type: 'element:op',
+          payload: {
+            operation: 'create',
+            client_operation_id: item.client_operation_id,
+            vector_clock: item.vector_clock,
+            element: {
+              type: state.type,
+              transform: state.transform,
+              style: state.style,
+              content: state.content,
+            },
+          },
+        })
+        sentItemIds.add(item.id)
+        return
+      }
+
+      const elementId = item.element_id ?? state?.server_id
+      if (!elementId) return
+
+      if (item.operation === 'update') {
+        if (!state || state.is_deleted) return
+        sendMessage({
+          type: 'element:op',
+          payload: {
+            operation: 'update',
+            element_id: elementId,
+            transform: state.transform,
+            style: state.style,
+            content: state.content,
+            vector_clock: item.vector_clock,
+          },
+        })
+        sentItemIds.add(item.id)
+        return
+      }
+
+      sendMessage({
+        type: 'element:op',
+        payload: { operation: 'delete', element_id: elementId, vector_clock: item.vector_clock },
+      })
+      sentItemIds.add(item.id)
+    })
+
+    const remainingQueue = queue.filter((item) => !sentItemIds.has(item.id))
+    saveQueue(remainingQueue)
+    if (sentItemIds.size > 0) {
+      setStatusMessage(`Synced ${sentItemIds.size} offline change${sentItemIds.size === 1 ? '' : 's'}.`)
+    }
+  }, [canSendRealtime, saveQueue, sendMessage])
 
   const showToolMessage = useCallback((message: string) => {
     setStatusMessage(message)
@@ -369,7 +716,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       preserveObjectStacking: true,
       selection: true,
     })
-    canvas.backgroundColor = 'rgba(248, 249, 255, 0)'
+    canvas.backgroundColor = 'rgba(245, 244, 236, 0)'
     fabricRef.current = canvas
 
     const resize = () => {
@@ -498,27 +845,27 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
     canvas.on('text:changed', (event) => {
       const obj = event.target as CanvasObject | undefined
-      if (!obj || applyingRemote.current || obj.isRemote || !obj.elementId) return
-      const elementId = obj.elementId
-      const existing = textUpdateTimers.current.get(elementId)
+      if (!obj || applyingRemote.current || obj.isRemote) return
+      const timerKey = obj.syncLocalId ?? obj.localCreateId ?? obj.elementId ?? ensureLocalId(obj)
+      const existing = textUpdateTimers.current.get(timerKey)
       if (existing) {
         window.clearTimeout(existing)
       }
       const timer = window.setTimeout(() => {
         sendElementUpdate(obj)
-        textUpdateTimers.current.delete(elementId)
+        textUpdateTimers.current.delete(timerKey)
       }, 300)
-      textUpdateTimers.current.set(elementId, timer)
+      textUpdateTimers.current.set(timerKey, timer)
     })
 
     canvas.on('text:editing:exited', (event) => {
       const obj = event.target as CanvasObject | undefined
-      if (!obj || applyingRemote.current || obj.isRemote || !obj.elementId) return
-      const elementId = obj.elementId
-      const existing = textUpdateTimers.current.get(elementId)
+      if (!obj || applyingRemote.current || obj.isRemote) return
+      const timerKey = obj.syncLocalId ?? obj.localCreateId ?? obj.elementId ?? ensureLocalId(obj)
+      const existing = textUpdateTimers.current.get(timerKey)
       if (existing) {
         window.clearTimeout(existing)
-        textUpdateTimers.current.delete(elementId)
+        textUpdateTimers.current.delete(timerKey)
       }
       sendElementUpdate(obj)
     })
@@ -540,6 +887,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   }, [
     cursorColor,
     deleteActiveObjects,
+    ensureLocalId,
     page?.id,
     sendElementCreate,
     sendElementDelete,
@@ -554,20 +902,38 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     let cancelled = false
 
     const load = async () => {
+      restLoadSucceededRef.current = false
       setIsLoadingPage(true)
       try {
         const elements = await listElements(pageId)
         if (cancelled || pageRef.current?.id !== pageId || !fabricRef.current) return
+        restLoadSucceededRef.current = true
         applyingRemote.current = true
         fabricRef.current.clear()
-        fabricRef.current.backgroundColor = 'rgba(248, 249, 255, 0)'
+        fabricRef.current.backgroundColor = 'rgba(245, 244, 236, 0)'
         objectsById.current.clear()
         pendingCreates.current.clear()
+        if (offlineQueueRef.current.length === 0) {
+          yElementsRef.current?.clear()
+        }
         setCursors({})
-        elements.filter((element) => !element.is_deleted).forEach(addElementToCanvas)
+        elements.filter((element) => !element.is_deleted).forEach((element) => {
+          writeServerElementToYjs(element)
+          addElementToCanvas(element)
+        })
+        if (offlineQueueRef.current.length > 0) {
+          Array.from(yElementsRef.current?.values() ?? [])
+            .filter((element) => !element.is_deleted && !element.server_id)
+            .forEach(addCachedElementToCanvas)
+        }
       } catch {
         if (!cancelled) {
-          setStatusMessage('Failed to load elements for this page.')
+          const cachedCount = renderCachedElements()
+          setStatusMessage(
+            cachedCount > 0
+              ? 'Loaded your offline notebook copy.'
+              : 'Failed to load elements for this page.',
+          )
         }
       } finally {
         if (!cancelled) {
@@ -581,7 +947,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     return () => {
       cancelled = true
     }
-  }, [addElementToCanvas, page?.id])
+  }, [addCachedElementToCanvas, addElementToCanvas, page?.id, renderCachedElements, writeServerElementToYjs])
 
   useEffect(() => {
     const pageId = page?.id
@@ -595,6 +961,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
     socket.onopen = () => {
       setConnectionState('connected')
+      window.setTimeout(() => flushOfflineQueue(), 0)
     }
     socket.onclose = () => {
       setConnectionState('disconnected')
@@ -618,10 +985,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
                 obj.elementId = created.id
                 obj.canvexType = created.type
                 objectsById.current.set(created.id, obj)
+                writeServerElementToYjs(created, obj.syncLocalId ?? created.id)
                 if (obj.pendingSync) {
                   delete obj.pendingSync
                   sendElementUpdate(obj)
                 }
+              } else {
+                writeServerElementToYjs(created)
               }
             }
             if (message.operation === 'update') {
@@ -712,11 +1082,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   }, [
     accessToken,
     addElementToCanvas,
+    flushOfflineQueue,
     page?.id,
     removeElementFromCanvas,
     sendElementUpdate,
     updateElementOnCanvas,
     user.id,
+    writeServerElementToYjs,
   ])
 
   useEffect(() => {
@@ -740,6 +1112,12 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     const timer = window.setTimeout(() => setStatusMessage(null), 4000)
     return () => window.clearTimeout(timer)
   }, [statusMessage])
+
+  useEffect(() => {
+    if (!isOffline) {
+      flushOfflineQueue()
+    }
+  }, [flushOfflineQueue, isOffline])
 
   if (!page) {
     return (
@@ -815,6 +1193,11 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         <span className={`workspace-live-chip ${isConnected ? 'online' : ''}`}>
           {isConnected ? 'Live' : connectionState === 'connecting' ? 'Connecting' : 'Offline'}
         </span>
+        {(isOffline || queuedOpsCount > 0) && (
+          <span className="workspace-offline-chip">
+            {isOffline ? 'Working offline' : `${queuedOpsCount} queued`}
+          </span>
+        )}
         <button type="button" className="workspace-ai-button" onClick={() => setIsAiOpen((prev) => !prev)}>
           <Sparkles size={15} />
           <span className="workspace-ai-label">Ask Canvex</span>

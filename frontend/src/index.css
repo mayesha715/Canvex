@@ -309,6 +309,11 @@
     animation: live-pulse 1.4s ease-in-out infinite;
   }
 
+  .workspace-offline-chip {
+    @apply inline-flex items-center rounded-full border border-amber-200 bg-amber-50/85 px-3 py-1.5 text-lg font-semibold text-amber-700 backdrop-blur-sm;
+    font-family: "Caveat", cursive;
+  }
+
   .workspace-ai-button {
     @apply inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50/80 px-3 py-1.5 text-sm font-medium text-indigo-700 backdrop-blur-sm hover:bg-indigo-100/80;
   }
