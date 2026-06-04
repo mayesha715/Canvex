@@ -19,6 +19,7 @@ from app.models.channel import ChannelMember
 from app.models.enums import MemberRole
 from app.models.user import User
 from app.schemas.whiteboard import ElementCreate, ElementRead, ElementUpdate
+from app.services.audit import end_active_session, get_or_create_active_session, record_session_event
 from app.services.elements import (
     assert_minimum_role,
     create_element_for_page,
@@ -147,6 +148,26 @@ async def try_send_error(websocket: WebSocket, exc: Exception) -> None:
         pass
 
 
+async def record_ws_event(
+    *,
+    session_id: UUID,
+    page_id: UUID,
+    event_type: str,
+    payload: dict[str, Any],
+    actor_id: UUID,
+) -> None:
+    async with AsyncSessionLocal() as db:
+        await record_session_event(
+            db,
+            session_id=session_id,
+            page_id=page_id,
+            event_type=event_type,
+            payload=payload,
+            actor_id=actor_id,
+        )
+        await db.commit()
+
+
 @router.websocket("/ws/{page_id}")
 async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
     redis = get_redis()
@@ -159,6 +180,11 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
         except HTTPException:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
+
+    async with AsyncSessionLocal() as db:
+        session = await get_or_create_active_session(db, page_id)
+        await db.commit()
+        session_id = session.id
 
     await manager.connect(websocket, page_id, user.id)
     await manager.broadcast(
@@ -202,6 +228,13 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
                         await redis.set(lock_key(element_id), str(user.id), ex=LOCK_TTL_SECONDS)
                         manager.remember_lock(websocket, element_id)
                     lock_payload = {"element_id": str(element_id), "locked_by": str(user.id), "ttl_s": LOCK_TTL_SECONDS}
+                    await record_ws_event(
+                        session_id=session_id,
+                        page_id=page_id,
+                        event_type="element:lock",
+                        payload=lock_payload,
+                        actor_id=user.id,
+                    )
                     await websocket.send_json({"type": "element:lock:ack", "payload": lock_payload})
                     await manager.broadcast(page_id, {"type": "element:lock", "payload": lock_payload}, exclude=websocket)
                 except Exception as exc:
@@ -221,6 +254,13 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
                     ack = {"type": "element:ack", "operation": operation, "payload": element_data}
                     if payload.get("client_operation_id") is not None:
                         ack["client_operation_id"] = payload["client_operation_id"]
+                    await record_ws_event(
+                        session_id=session_id,
+                        page_id=page_id,
+                        event_type="element:op",
+                        payload={"operation": operation, "payload": element_data},
+                        actor_id=user.id,
+                    )
                     await websocket.send_json(ack)
                     await manager.broadcast(page_id, event, exclude=websocket)
                 except Exception as exc:
@@ -237,12 +277,24 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
         for element_id in released_locks:
             if await redis.get(lock_key(element_id)) == str(user.id):
                 await redis.delete(lock_key(element_id))
+                unlock_payload = {"element_id": str(element_id), "unlocked_by": str(user.id)}
+                await record_ws_event(
+                    session_id=session_id,
+                    page_id=page_id,
+                    event_type="element:unlock",
+                    payload=unlock_payload,
+                    actor_id=user.id,
+                )
                 await manager.broadcast(
                     page_id,
-                    {"type": "element:unlock", "payload": {"element_id": str(element_id), "unlocked_by": str(user.id)}},
+                    {"type": "element:unlock", "payload": unlock_payload},
                     exclude=websocket,
                 )
         await manager.broadcast(page_id, {"type": "presence:leave", "payload": {"user_id": str(user.id)}}, exclude=websocket)
+        if page_id not in manager.rooms:
+            async with AsyncSessionLocal() as db:
+                await end_active_session(db, page_id)
+                await db.commit()
 
 
 @router.get("/pages/{page_id}/presence")

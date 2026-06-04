@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 6 is implemented with offline-first canvas persistence and reconnect sync:
+Phase 7 is implemented with audit log querying, version restore, and session replay:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -35,6 +35,11 @@ Phase 6 is implemented with offline-first canvas persistence and reconnect sync:
 - Online/offline detection with a visible workspace status chip
 - Reconnect replay of queued operations through the existing authenticated WebSocket
 - `protocol: "canvas"` marker on realtime messages for future protocol expansion
+- Page audit endpoint with filters for element, actor, operation, and timestamp range
+- Element history endpoint with before/after states and actor attribution
+- Point-in-time restore for individual elements and whole pages
+- WebSocket session recording for element operations, locks, unlocks, and cursor movement
+- Session replay endpoint that streams recorded events as newline-delimited JSON
 
 ## Local Full-Stack Setup
 
@@ -122,10 +127,15 @@ npm run lint
 npm run build
 ```
 
-## Phase 6 Notes
+## Phase 7 Notes
 
 - Element create/update/delete operations are persisted through the backend WebSocket route and still write to the append-only event log.
 - Create acknowledgements use a client operation id so rapid local creates are matched to the correct Fabric object.
 - The canvas stores a local Yjs `elements` map in IndexedDB for each page, so cached elements can be restored when the network is unavailable.
 - While offline, element operations are queued locally. When the browser reconnects and the page WebSocket opens, queued operations are replayed with their original vector clocks.
 - The installed `y-websocket` dependency is reserved for a later binary Yjs transport. The current Phase 6 implementation keeps the existing JSON WebSocket contract and adds a `protocol` field so protocol routing can evolve without breaking canvas messages.
+- `GET /pages/{page_id}/audit` returns a paginated event log with optional filters.
+- `GET /elements/{element_id}/history` returns the full lifecycle for one element.
+- `POST /elements/{element_id}/restore` and `POST /pages/{page_id}/restore` accept `target_timestamp`.
+- `GET /pages/{page_id}/sessions` lists recent replayable sessions.
+- `GET /sessions/{session_id}/replay?speed=1|2|4` streams replay events as `application/x-ndjson`.
