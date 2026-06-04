@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -60,6 +60,20 @@ class PageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BranchCreate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Branch title cannot be blank")
+        return normalized
+
+
 class ElementCreate(BaseModel):
     type: ElementType
     transform: JsonObject = Field(default_factory=default_transform)
@@ -90,3 +104,25 @@ class ElementRead(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class BranchModifiedElement(BaseModel):
+    parent: ElementRead
+    branch: ElementRead
+
+
+class BranchDiff(BaseModel):
+    added: list[ElementRead]
+    modified: list[BranchModifiedElement]
+    deleted: list[ElementRead]
+
+
+class BranchMergeRequest(BaseModel):
+    strategy: Literal["ours", "theirs"] = "theirs"
+
+
+class BranchMergeSummary(BaseModel):
+    strategy: Literal["ours", "theirs"]
+    added_count: int
+    modified_count: int
+    deleted_count: int

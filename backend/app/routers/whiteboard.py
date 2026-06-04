@@ -16,7 +16,20 @@ from app.models.element import WhiteboardElement
 from app.models.enums import ElementType, MemberRole
 from app.models.page import WhiteboardPage
 from app.models.user import User
-from app.schemas.whiteboard import ElementCreate, ElementRead, ElementUpdate, PageCreate, PageRead, PageUpdate
+from app.schemas.whiteboard import (
+    BranchCreate,
+    BranchDiff,
+    BranchMergeRequest,
+    BranchMergeSummary,
+    BranchModifiedElement,
+    ElementCreate,
+    ElementRead,
+    ElementUpdate,
+    PageCreate,
+    PageRead,
+    PageUpdate,
+)
+from app.services.branching import compute_branch_diff, create_page_branch, merge_branch_into_parent, strip_branch_metadata
 from app.services.elements import (
     assert_minimum_role,
     create_element_for_page,
@@ -31,6 +44,11 @@ router = APIRouter(tags=["whiteboard"])
 
 PageAccess = tuple[WhiteboardPage, ChannelMember]
 ElementAccess = tuple[WhiteboardElement, WhiteboardPage, ChannelMember]
+
+
+def element_read_without_branch_metadata(element: WhiteboardElement) -> ElementRead:
+    item = ElementRead.model_validate(element)
+    return item.model_copy(update={"content": strip_branch_metadata(item.content)})
 
 
 def require_page_role(minimum_role: MemberRole) -> Callable[..., Coroutine[Any, Any, PageAccess]]:
@@ -73,7 +91,6 @@ async def create_page(
     max_order = await db.scalar(
         select(func.coalesce(func.max(WhiteboardPage.order_index), -1)).where(
             WhiteboardPage.channel_id == channel_id,
-            WhiteboardPage.is_branch.is_(False),
             WhiteboardPage.is_deleted.is_(False),
         )
     )
@@ -99,12 +116,68 @@ async def list_pages(
         select(WhiteboardPage)
         .where(
             WhiteboardPage.channel_id == channel_id,
-            WhiteboardPage.is_branch.is_(False),
             WhiteboardPage.is_deleted.is_(False),
         )
         .order_by(WhiteboardPage.order_index.asc(), WhiteboardPage.created_at.asc())
     )
     return list(pages.all())
+
+
+@router.post("/pages/{page_id}/branch", response_model=PageRead, status_code=status.HTTP_201_CREATED)
+async def branch_page(
+    payload: BranchCreate | None = None,
+    access: PageAccess = Depends(require_page_role(MemberRole.EDITOR)),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WhiteboardPage:
+    page, _membership = access
+    branch = await create_page_branch(
+        db,
+        page=page,
+        actor_id=current_user.id,
+        title=payload.title if payload else None,
+    )
+    await db.commit()
+    await db.refresh(branch)
+    return branch
+
+
+@router.get("/pages/{page_id}/diff", response_model=BranchDiff)
+async def diff_page_branch(
+    access: PageAccess = Depends(require_page_role(MemberRole.VIEWER)),
+    db: AsyncSession = Depends(get_db),
+) -> BranchDiff:
+    branch, _membership = access
+    diff = await compute_branch_diff(db, branch)
+    return BranchDiff(
+        added=[element_read_without_branch_metadata(element) for element in diff.added],
+        modified=[
+            BranchModifiedElement(
+                parent=element_read_without_branch_metadata(parent),
+                branch=element_read_without_branch_metadata(branch_element),
+            )
+            for parent, branch_element in diff.modified
+        ],
+        deleted=[element_read_without_branch_metadata(element) for element in diff.deleted],
+    )
+
+
+@router.post("/pages/{page_id}/merge", response_model=BranchMergeSummary)
+async def merge_page_branch(
+    payload: BranchMergeRequest,
+    access: PageAccess = Depends(require_page_role(MemberRole.EDITOR)),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> BranchMergeSummary:
+    branch, _membership = access
+    summary = await merge_branch_into_parent(
+        db,
+        branch=branch,
+        actor_id=current_user.id,
+        strategy=payload.strategy,
+    )
+    await db.commit()
+    return summary
 
 
 @router.patch("/pages/{page_id}", response_model=PageRead)
@@ -122,7 +195,6 @@ async def update_page(
         max_order = await db.scalar(
             select(func.coalesce(func.max(WhiteboardPage.order_index), 0)).where(
                 WhiteboardPage.channel_id == page.channel_id,
-                WhiteboardPage.is_branch.is_(False),
                 WhiteboardPage.is_deleted.is_(False),
             )
         )
@@ -133,7 +205,6 @@ async def update_page(
                 .where(
                     WhiteboardPage.channel_id == page.channel_id,
                     WhiteboardPage.id != page.id,
-                    WhiteboardPage.is_branch.is_(False),
                     WhiteboardPage.is_deleted.is_(False),
                     WhiteboardPage.order_index >= new_index,
                     WhiteboardPage.order_index < old_index,
@@ -146,7 +217,6 @@ async def update_page(
                 .where(
                     WhiteboardPage.channel_id == page.channel_id,
                     WhiteboardPage.id != page.id,
-                    WhiteboardPage.is_branch.is_(False),
                     WhiteboardPage.is_deleted.is_(False),
                     WhiteboardPage.order_index > old_index,
                     WhiteboardPage.order_index <= new_index,

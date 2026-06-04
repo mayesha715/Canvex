@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 7 is implemented with audit log querying, version restore, and session replay:
+Phase 8 is implemented with audit log querying, session replay, and Git-style board branching:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -139,3 +139,11 @@ npm run build
 - `POST /elements/{element_id}/restore` and `POST /pages/{page_id}/restore` accept `target_timestamp`.
 - `GET /pages/{page_id}/sessions` lists recent replayable sessions.
 - `GET /sessions/{session_id}/replay?speed=1|2|4` streams replay events as `application/x-ndjson`.
+
+## Phase 8 Notes
+
+- `POST /pages/{page_id}/branch` forks a parent page into a branch and copies active elements with `content._origin_id` lineage metadata.
+- `GET /pages/{page_id}/diff` compares a branch against its parent and returns added, modified, and deleted elements.
+- `POST /pages/{page_id}/merge` merges a branch back into its parent with `ours` or `theirs` strategy.
+- Branch diff comparison includes element type, transform, style, and content while ignoring `_origin_id`.
+- Merge writes element events for each parent element created, updated, or deleted.
