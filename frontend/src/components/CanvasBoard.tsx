@@ -14,11 +14,13 @@ import {
   Sparkles,
   StickyNote,
   Text,
+  ThumbsDown,
+  ThumbsUp,
   Undo2,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { getPresenceCount, listElements } from '../lib/api'
+import { getPresenceCount, listElements, listPageAiLog, submitAIFeedback } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import {
   getClientId,
@@ -29,7 +31,7 @@ import {
   type OfflineQueueItem,
   type VectorClock,
 } from '../lib/offlineSync'
-import type { Element, ElementType, PageSummary, User } from '../types'
+import type { AITriggerType, Element, ElementType, PageSummary, User } from '../types'
 
 type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'sticky'
 
@@ -64,8 +66,23 @@ const TOOL_LABELS: Record<Tool, string> = {
   sticky: 'Sticky Note',
 }
 
+type AIMessage = {
+  interactionId: string
+  triggerType: AITriggerType
+  content: string
+  elementId?: string
+}
+
 const DEFAULT_RECT = { width: 140, height: 90 }
 const DEFAULT_ELLIPSE = { rx: 60, ry: 40 }
+
+const AI_TEXT_PATTERN = /(^\/ai|^\*|[?]$|[-+]?\d*\.?\d*\s*x\s*(?:[+-]\s*\d+(?:\.\d+)?)?\s*=\s*[-+]?\d+(?:\.\d+)?)/i
+
+const shouldAttachAISnapshot = (element: { type: ElementType; content: Record<string, unknown> }) => {
+  if (element.type === 'image') return true
+  const text = String(element.content.text ?? element.content.label ?? element.content.latex ?? '')
+  return AI_TEXT_PATTERN.test(text)
+}
 
 const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -96,6 +113,8 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [strokeColor, setStrokeColor] = useState('#0f172a')
   const [isAiOpen, setIsAiOpen] = useState(false)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiMessages, setAiMessages] = useState<AIMessage[]>([])
   const [isLoadingPage, setIsLoadingPage] = useState(false)
   const [isOffline, setIsOffline] = useState(!navigator.onLine)
   const [queuedOpsCount, setQueuedOpsCount] = useState(0)
@@ -171,6 +190,16 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const sendMessage = useCallback((payload: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ protocol: 'canvas', ...payload }))
+    }
+  }, [])
+
+  const captureCanvasSnapshot = useCallback(() => {
+    const canvas = fabricRef.current
+    if (!canvas) return undefined
+    try {
+      return canvas.toDataURL({ format: 'png', multiplier: 0.5, quality: 0.72 })
+    } catch {
+      return undefined
     }
   }, [])
 
@@ -501,12 +530,14 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       writeElementToYjs(obj)
       pendingCreates.current.set(clientOperationId, obj)
       const vectorClock = nextVectorClock()
+      const snapshotB64 = shouldAttachAISnapshot(elementPayload) ? captureCanvasSnapshot() : undefined
       const message = {
         type: 'element:op',
         payload: {
           operation: 'create',
           client_operation_id: clientOperationId,
           vector_clock: vectorClock,
+          snapshot_b64: snapshotB64,
           element: elementPayload,
         },
       }
@@ -522,6 +553,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       nextVectorClock,
       queueOfflineOperation,
       resolveElementType,
+      captureCanvasSnapshot,
       sendMessage,
       toContent,
       toStyle,
@@ -541,6 +573,11 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         }
         return
       }
+      const elementPayload = {
+        type: resolveElementType(obj),
+        content: toContent(obj),
+      }
+      const snapshotB64 = shouldAttachAISnapshot(elementPayload) ? captureCanvasSnapshot() : undefined
       const message = {
         type: 'element:op',
         payload: {
@@ -548,8 +585,9 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           element_id: obj.elementId,
           transform: toTransform(obj),
           style: toStyle(obj),
-          content: toContent(obj),
+          content: elementPayload.content,
           vector_clock: vectorClock,
+          snapshot_b64: snapshotB64,
         },
       }
       if (canSendRealtime()) {
@@ -558,7 +596,18 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         queueOfflineOperation('update', obj, vectorClock)
       }
     },
-    [canSendRealtime, nextVectorClock, queueOfflineOperation, sendMessage, toContent, toStyle, toTransform, writeElementToYjs],
+    [
+      canSendRealtime,
+      captureCanvasSnapshot,
+      nextVectorClock,
+      queueOfflineOperation,
+      resolveElementType,
+      sendMessage,
+      toContent,
+      toStyle,
+      toTransform,
+      writeElementToYjs,
+    ],
   )
 
   const sendElementDelete = useCallback(
@@ -662,6 +711,57 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const showToolMessage = useCallback((message: string) => {
     setStatusMessage(message)
   }, [])
+
+  const askCanvex = useCallback(() => {
+    const canvas = fabricRef.current
+    const prompt = aiPrompt.trim()
+    if (!page?.id || !canvas) {
+      showToolMessage('Create or select a page before asking Canvex.')
+      return
+    }
+    if (!prompt) {
+      showToolMessage('Write a question for Canvex first.')
+      return
+    }
+    const obj = new Textbox(`/ai ${prompt}`, {
+      left: 180,
+      top: 140,
+      width: 360,
+      fontSize: 24,
+      fontFamily: 'Caveat, cursive',
+      fill: '#4f46e5',
+      stroke: '#4f46e5',
+      strokeWidth: 0,
+    }) as CanvasObject
+    obj.canvexType = 'text'
+    canvas.add(obj)
+    canvas.setActiveObject(obj)
+    canvas.requestRenderAll()
+    setAiPrompt('')
+    setStatusMessage('Canvex AI is reading the canvas...')
+  }, [aiPrompt, page?.id, showToolMessage])
+
+  const sendAIFeedback = useCallback(
+    async (interactionId: string, isCorrect: boolean) => {
+      const correctionText = isCorrect
+        ? null
+        : window.prompt('What should Canvex remember for next time?')
+      if (!isCorrect && !correctionText?.trim()) {
+        showToolMessage('Feedback cancelled. Add a correction so Canvex can learn from it.')
+        return
+      }
+      try {
+        await submitAIFeedback(interactionId, {
+          is_correct: isCorrect,
+          correction_text: correctionText?.trim() || null,
+        })
+        showToolMessage(isCorrect ? 'Marked as helpful.' : 'Correction saved for future prompts.')
+      } catch {
+        showToolMessage('Could not save AI feedback.')
+      }
+    },
+    [showToolMessage],
+  )
 
   const applyStrokeColor = useCallback(
     (color: string) => {
@@ -1054,6 +1154,26 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
             }))
             return
           }
+          case 'ai:response': {
+            const payload = message.payload as {
+              element: Element
+              interaction_id: string
+              trigger_type: AITriggerType
+            }
+            addElementToCanvas(payload.element)
+            setAiMessages((prev) => [
+              {
+                interactionId: payload.interaction_id,
+                triggerType: payload.trigger_type,
+                elementId: payload.element.id,
+                content: String(payload.element.content.text ?? 'AI response added to canvas.'),
+              },
+              ...prev.slice(0, 4),
+            ])
+            setIsAiOpen(true)
+            setStatusMessage('Canvex AI added a response.')
+            return
+          }
           case 'presence:leave': {
             const payload = message.payload as { user_id: string }
             setCursors((prev) => {
@@ -1090,6 +1210,40 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     user.id,
     writeServerElementToYjs,
   ])
+
+  useEffect(() => {
+    const pageId = page?.id
+    if (!pageId) {
+      setAiMessages([])
+      return
+    }
+    let cancelled = false
+    const loadAiLog = async () => {
+      try {
+        const interactions = await listPageAiLog(pageId)
+        if (cancelled) return
+        setAiMessages(
+          interactions
+            .filter((interaction) => interaction.status === 'succeeded' && interaction.response_json?.content)
+            .slice(0, 5)
+            .map((interaction) => ({
+              interactionId: interaction.id,
+              triggerType: interaction.trigger_type,
+              elementId: interaction.response_element_id ?? undefined,
+              content: String(interaction.response_json?.content ?? ''),
+            })),
+        )
+      } catch {
+        if (!cancelled) {
+          setAiMessages([])
+        }
+      }
+    }
+    loadAiLog()
+    return () => {
+      cancelled = true
+    }
+  }, [page?.id])
 
   useEffect(() => {
     const pageId = page?.id
@@ -1354,17 +1508,61 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           </div>
           <div className="mt-5 space-y-3 text-sm leading-6 text-slate-600">
             <p className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3">
-              I can help explain selected notes, summarize this page, or turn sketches into structured study points.
+              Write a question, or draw an equation like 2x + 5 = 13. Canvex will add the answer back onto the page.
             </p>
-            <input className="workspace-input" placeholder="Ask about this canvas..." />
+            <input
+              className="workspace-input"
+              placeholder="Ask about this canvas..."
+              value={aiPrompt}
+              onChange={(event) => setAiPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  askCanvex()
+                }
+              }}
+            />
             <button
               type="button"
               className="workspace-action-button w-full justify-center"
-              onClick={() => showToolMessage('AI features are coming in Phase 9.')}
+              onClick={askCanvex}
             >
               <Sparkles size={15} />
               Ask
             </button>
+            <div className="space-y-2">
+              {aiMessages.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-indigo-200 p-3 font-handwriting text-lg text-slate-500">
+                  AI responses will appear here after Canvex reads your canvas.
+                </p>
+              ) : (
+                aiMessages.map((message) => (
+                  <article key={message.interactionId} className="rounded-lg border border-indigo-100 bg-white/70 p-3">
+                    <p className="font-handwriting text-lg leading-6 text-slate-700">{message.content}</p>
+                    <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
+                      <span>{message.triggerType}</span>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          className="workspace-icon-button"
+                          title="Helpful"
+                          onClick={() => sendAIFeedback(message.interactionId, true)}
+                        >
+                          <ThumbsUp size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="workspace-icon-button"
+                          title="Incorrect"
+                          onClick={() => sendAIFeedback(message.interactionId, false)}
+                        >
+                          <ThumbsDown size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
           </div>
         </aside>
       )}

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     gemini_api_key: str = ""
+    gemini_vision_model: str = "gemini-1.5-pro"
+    gemini_embedding_model: str = "models/text-embedding-004"
     api_base_url: str = "http://localhost:8000"
     environment: str = "development"
     cors_allow_origins: list[str] = [

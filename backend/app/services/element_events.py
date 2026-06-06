@@ -32,7 +32,7 @@ async def log_element_event(
     db: AsyncSession,
     *,
     element: WhiteboardElement,
-    actor_id: UUID,
+    actor_id: UUID | None,
     operation: EventOperation,
     before_state: JsonState | None,
     after_state: JsonState | None,

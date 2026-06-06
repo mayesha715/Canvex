@@ -84,3 +84,22 @@ export type AuthSession = {
   refreshToken: string
   user: User
 }
+
+export type AITriggerType = 'math' | 'image' | 'question' | 'text_block' | 'closed_shape' | 'explicit'
+
+export type AIInteraction = {
+  id: string
+  page_id: string
+  trigger_element_id?: string | null
+  trigger_type: AITriggerType
+  canvas_snapshot_url?: string | null
+  prompt_sent: string
+  response_json?: Record<string, unknown> | null
+  response_element_id?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  latency_ms?: number | null
+  status: string
+  error_message?: string | null
+  created_at: string
+}

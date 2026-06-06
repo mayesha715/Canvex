@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -19,6 +21,7 @@ from app.models.channel import ChannelMember
 from app.models.enums import MemberRole
 from app.models.user import User
 from app.schemas.whiteboard import ElementCreate, ElementRead, ElementUpdate
+from app.services.ai import detect_ai_trigger, enqueue_ai_analysis, enqueue_text_embedding, page_ai_channel
 from app.services.audit import end_active_session, get_or_create_active_session, record_session_event
 from app.services.elements import (
     assert_minimum_role,
@@ -44,6 +47,10 @@ def lock_key(element_id: UUID) -> str:
 
 def cursor_key(page_id: UUID) -> str:
     return f"cursor:{page_id}"
+
+
+def ai_trigger_key(element_id: UUID, trigger_type: object) -> str:
+    return f"ai:trigger:{element_id}:{trigger_type}"
 
 
 async def authenticate_websocket_user(db: AsyncSession, token: str | None) -> User:
@@ -168,6 +175,26 @@ async def record_ws_event(
         await db.commit()
 
 
+async def forward_ai_events(websocket: WebSocket, page_id: UUID) -> None:
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    pubsub = redis.pubsub()
+    channel = page_ai_channel(page_id)
+    await pubsub.subscribe(channel)
+    try:
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            try:
+                await websocket.send_json(json.loads(str(message.get("data") or "{}")))
+            except RuntimeError:
+                break
+    finally:
+        with suppress(Exception):
+            await pubsub.unsubscribe(channel)
+            await pubsub.close()
+            await redis.aclose()
+
+
 @router.websocket("/ws/{page_id}")
 async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
     redis = get_redis()
@@ -187,6 +214,7 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
         session_id = session.id
 
     await manager.connect(websocket, page_id, user.id)
+    ai_forward_task = asyncio.create_task(forward_ai_events(websocket, page_id))
     await manager.broadcast(
         page_id,
         {"type": "presence:join", "payload": {"user_id": str(user.id), "display_name": user.display_name}},
@@ -261,6 +289,29 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
                         payload={"operation": operation, "payload": element_data},
                         actor_id=user.id,
                     )
+                    if operation in {"create", "update"}:
+                        if element_data.get("type") in {"text", "math", "sticky"}:
+                            with suppress(Exception):
+                                await enqueue_text_embedding(element_id=UUID(str(element_data["id"])))
+                        trigger_type = detect_ai_trigger(operation, element_data)
+                        if trigger_type is not None:
+                            with suppress(Exception):
+                                element_id = UUID(str(element_data["id"]))
+                                should_enqueue = await redis.set(
+                                    ai_trigger_key(element_id, trigger_type.value),
+                                    "1",
+                                    ex=10,
+                                    nx=True,
+                                )
+                                if should_enqueue:
+                                    await enqueue_ai_analysis(
+                                        page_id=page_id,
+                                        trigger_element_id=element_id,
+                                        trigger_type=trigger_type,
+                                        snapshot_b64=payload.get("snapshot_b64")
+                                        if isinstance(payload.get("snapshot_b64"), str)
+                                        else None,
+                                    )
                     await websocket.send_json(ack)
                     await manager.broadcast(page_id, event, exclude=websocket)
                 except Exception as exc:
@@ -272,6 +323,9 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        ai_forward_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await ai_forward_task
         released_locks = manager.disconnect(websocket, page_id)
         await redis.hdel(cursor_key(page_id), str(user.id))
         for element_id in released_locks:

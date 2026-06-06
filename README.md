@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phase 8 is implemented with audit log querying, session replay, and Git-style board branching:
+Phase 9 is implemented with audit log querying, session replay, Git-style board branching, and the AI pipeline:
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -40,17 +40,23 @@ Phase 8 is implemented with audit log querying, session replay, and Git-style bo
 - Point-in-time restore for individual elements and whole pages
 - WebSocket session recording for element operations, locks, unlocks, and cursor movement
 - Session replay endpoint that streams recorded events as newline-delimited JSON
+- WebSocket AI trigger detection for math, questions, images, closed shapes, and explicit `/ai` prompts
+- ARQ-backed `ai-worker` service for canvas analysis and text embedding jobs
+- Gemini integration with deterministic local fallback when `GEMINI_API_KEY` is not configured
+- AI interaction ledger and `GET /pages/{page_id}/ai-log`
+- AI feedback endpoint: `POST /ai/{interaction_id}/feedback`
+- Semantic search endpoint: `GET /search?q=...`
 
 ## Local Full-Stack Setup
 
-The backend and frontend run as separate development servers:
+The backend, AI worker, and frontend run as separate development processes:
 
 - FastAPI API: `http://localhost:8000`
 - Vite frontend: `http://localhost:5173`
 - PostgreSQL: Docker service `postgres`
 - Redis: Docker service `redis`
 
-Start infrastructure first, then run the backend and frontend in separate terminals.
+Start infrastructure first, then run the backend, AI worker, and frontend in separate terminals.
 
 ## Local Backend Setup
 
@@ -87,6 +93,15 @@ uvicorn app.main:app --reload
 ```
 
 The smoke test endpoint is `GET /health`.
+
+7. Start the AI worker in a separate terminal:
+
+```powershell
+cd backend
+arq app.workers.ai_worker.WorkerSettings
+```
+
+If `GEMINI_API_KEY` is empty, Canvex still creates AI ledger rows and local deterministic responses for development.
 
 ## Local Frontend Setup
 
@@ -147,3 +162,11 @@ npm run build
 - `POST /pages/{page_id}/merge` merges a branch back into its parent with `ours` or `theirs` strategy.
 - Branch diff comparison includes element type, transform, style, and content while ignoring `_origin_id`.
 - Merge writes element events for each parent element created, updated, or deleted.
+
+## Phase 9 Notes
+
+- Browser canvas snapshots are attached to qualifying WebSocket element operations.
+- The API enqueues ARQ jobs instead of calling Gemini inside the WebSocket request path.
+- The worker writes every AI attempt to `ai_interactions`, creates an AI text element on success, computes an embedding, and publishes an `ai:response` message through Redis.
+- Connected WebSocket clients subscribe to Redis AI response messages and render generated answers live.
+- Feedback rows are injected into future prompts per channel so repeated corrections improve responses.

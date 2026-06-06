@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 import { clearSession, loadSession, saveSession } from './storage'
-import type { AuthSession, ChannelDetail, ChannelListItem, Element, PageSummary, User } from '../types'
+import type { AIInteraction, AuthSession, ChannelDetail, ChannelListItem, Element, PageSummary, User } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
@@ -93,4 +93,17 @@ export const listElements = async (pageId: string): Promise<Element[]> => {
 export const getPresenceCount = async (pageId: string): Promise<number> => {
   const { data } = await apiClient.get(`/pages/${pageId}/presence`)
   return data.count ?? 0
+}
+
+export const listPageAiLog = async (pageId: string): Promise<AIInteraction[]> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/ai-log`)
+  return data
+}
+
+export const submitAIFeedback = async (
+  interactionId: string,
+  payload: { is_correct: boolean; correction_text?: string | null },
+) => {
+  const { data } = await apiClient.post(`/ai/${interactionId}/feedback`, payload)
+  return data
 }

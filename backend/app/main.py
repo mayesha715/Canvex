@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.routers.ai import router as ai_router
 from app.routers.audit import router as audit_router
 from app.routers.auth import router as auth_router
 from app.routers.channels import router as channels_router
@@ -22,6 +23,7 @@ app.include_router(auth_router)
 app.include_router(channels_router)
 app.include_router(whiteboard_router)
 app.include_router(audit_router)
+app.include_router(ai_router)
 app.include_router(ws_router)
 
 

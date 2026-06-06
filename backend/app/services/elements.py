@@ -68,7 +68,7 @@ async def create_element_for_page(
     *,
     page_id: UUID,
     payload: ElementCreate,
-    actor_id: UUID,
+    actor_id: UUID | None,
 ) -> WhiteboardElement:
     element = WhiteboardElement(
         page_id=page_id,

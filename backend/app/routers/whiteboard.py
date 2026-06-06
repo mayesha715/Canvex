@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from app.schemas.whiteboard import (
     PageUpdate,
 )
 from app.services.branching import compute_branch_diff, create_page_branch, merge_branch_into_parent, strip_branch_metadata
+from app.services.ai import enqueue_text_embedding
 from app.services.elements import (
     assert_minimum_role,
     create_element_for_page,
@@ -283,6 +285,9 @@ async def create_element(
     )
     await db.commit()
     await db.refresh(element)
+    if element.type in {ElementType.TEXT, ElementType.MATH, ElementType.STICKY}:
+        with suppress(Exception):
+            await enqueue_text_embedding(element_id=element.id)
     return element
 
 
@@ -303,6 +308,9 @@ async def update_element(
     )
     await db.commit()
     await db.refresh(element)
+    if element.type in {ElementType.TEXT, ElementType.MATH, ElementType.STICKY}:
+        with suppress(Exception):
+            await enqueue_text_embedding(element_id=element.id)
     return element
 
 
