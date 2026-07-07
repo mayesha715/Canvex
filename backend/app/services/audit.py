@@ -190,7 +190,7 @@ async def record_session_event(
     return event
 
 
-async def end_active_session(db: AsyncSession, page_id: UUID) -> None:
+async def end_active_session(db: AsyncSession, page_id: UUID) -> Session | None:
     session = await db.scalar(
         select(Session)
         .where(Session.page_id == page_id, Session.ended_at.is_(None))
@@ -198,6 +198,7 @@ async def end_active_session(db: AsyncSession, page_id: UUID) -> None:
         .limit(1)
     )
     if session is None:
-        return
+        return None
     session.ended_at = datetime.now(UTC)
     await db.flush()
+    return session

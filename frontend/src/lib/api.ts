@@ -107,3 +107,21 @@ export const submitAIFeedback = async (
   const { data } = await apiClient.post(`/ai/${interactionId}/feedback`, payload)
   return data
 }
+
+export const createShareLink = async (
+  pageId: string,
+  expiresInHours = 168,
+): Promise<{ token: string; share_url: string; expires_at: string }> => {
+  const { data } = await apiClient.post(`/pages/${pageId}/share`, { expires_in_hours: expiresInHours })
+  return data
+}
+
+export type SharedPageResponse = {
+  page: PageSummary & { channel_id: string; is_deleted: boolean }
+  elements: Element[]
+}
+
+export const getSharedPage = async (token: string): Promise<SharedPageResponse> => {
+  const { data } = await apiClient.get(`/view/${token}`)
+  return data
+}

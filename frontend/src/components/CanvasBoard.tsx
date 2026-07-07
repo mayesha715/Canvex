@@ -7,6 +7,7 @@ import {
   Eraser,
   Highlighter,
   Image,
+  Link2,
   Move,
   PenLine,
   RectangleHorizontal,
@@ -20,7 +21,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { getPresenceCount, listElements, listPageAiLog, submitAIFeedback } from '../lib/api'
+import { createShareLink, getPresenceCount, listElements, listPageAiLog, submitAIFeedback } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import {
   getClientId,
@@ -96,6 +97,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const yElementsRef = useRef<Y.Map<OfflineElementState> | null>(null)
   const yPersistenceRef = useRef<IndexeddbPersistence | null>(null)
   const offlineQueueRef = useRef<OfflineQueueItem[]>([])
+  const inFlightOfflineIds = useRef<Set<string>>(new Set())
   const restLoadSucceededRef = useRef(false)
   const renderCachedElementsRef = useRef<() => number>(() => 0)
   const applyingRemote = useRef(false)
@@ -638,14 +640,35 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     [sendMessage],
   )
 
+  // Resolves (removes) a queued offline item once the server has confirmed the
+  // outcome — success or rejection — for its client_operation_id. Items are
+  // deliberately NOT removed from the queue at send time: if the connection
+  // drops before a response arrives, or the server rejects the change (e.g.
+  // the element was deleted/locked while offline), the item stays queued and
+  // is retried on the next reconnect instead of being silently lost.
+  const resolveOfflineQueueItem = useCallback(
+    (clientOperationId: string | null | undefined, outcome: 'synced' | 'rejected', detail?: string) => {
+      if (!clientOperationId) return
+      inFlightOfflineIds.current.delete(clientOperationId)
+      const existing = offlineQueueRef.current
+      if (!existing.some((item) => item.client_operation_id === clientOperationId)) return
+      saveQueue(existing.filter((item) => item.client_operation_id !== clientOperationId))
+      if (outcome === 'rejected') {
+        setStatusMessage(`An offline change could not be saved${detail ? `: ${detail}` : '.'}`)
+      }
+    },
+    [saveQueue],
+  )
+
   const flushOfflineQueue = useCallback(() => {
     const pageId = pageRef.current?.id
     const elements = yElementsRef.current
     if (!pageId || !elements || !canSendRealtime() || offlineQueueRef.current.length === 0) return
 
-    const queue = [...offlineQueueRef.current]
-    const sentItemIds = new Set<string>()
+    const queue = offlineQueueRef.current
+    let sentCount = 0
     queue.forEach((item) => {
+      if (inFlightOfflineIds.current.has(item.client_operation_id)) return
       const state = elements.get(item.local_id)
       if (item.operation === 'create') {
         if (!state || state.is_deleted) return
@@ -656,6 +679,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           obj.localCreateId = item.client_operation_id
           pendingCreates.current.set(item.client_operation_id, obj)
         }
+        inFlightOfflineIds.current.add(item.client_operation_id)
         sendMessage({
           type: 'element:op',
           payload: {
@@ -670,7 +694,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
             },
           },
         })
-        sentItemIds.add(item.id)
+        sentCount += 1
         return
       }
 
@@ -679,38 +703,63 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
       if (item.operation === 'update') {
         if (!state || state.is_deleted) return
+        inFlightOfflineIds.current.add(item.client_operation_id)
         sendMessage({
           type: 'element:op',
           payload: {
             operation: 'update',
             element_id: elementId,
+            client_operation_id: item.client_operation_id,
             transform: state.transform,
             style: state.style,
             content: state.content,
             vector_clock: item.vector_clock,
           },
         })
-        sentItemIds.add(item.id)
+        sentCount += 1
         return
       }
 
+      inFlightOfflineIds.current.add(item.client_operation_id)
       sendMessage({
         type: 'element:op',
-        payload: { operation: 'delete', element_id: elementId, vector_clock: item.vector_clock },
+        payload: {
+          operation: 'delete',
+          element_id: elementId,
+          client_operation_id: item.client_operation_id,
+          vector_clock: item.vector_clock,
+        },
       })
-      sentItemIds.add(item.id)
+      sentCount += 1
     })
 
-    const remainingQueue = queue.filter((item) => !sentItemIds.has(item.id))
-    saveQueue(remainingQueue)
-    if (sentItemIds.size > 0) {
-      setStatusMessage(`Synced ${sentItemIds.size} offline change${sentItemIds.size === 1 ? '' : 's'}.`)
+    if (sentCount > 0) {
+      setStatusMessage(`Syncing ${sentCount} offline change${sentCount === 1 ? '' : 's'}...`)
     }
-  }, [canSendRealtime, saveQueue, sendMessage])
+  }, [canSendRealtime, sendMessage])
 
   const showToolMessage = useCallback((message: string) => {
     setStatusMessage(message)
   }, [])
+
+  const handleShare = useCallback(async () => {
+    if (!page) {
+      showToolMessage('Select a page before creating a share link.')
+      return
+    }
+    try {
+      const { share_url } = await createShareLink(page.id)
+      const fullUrl = `${window.location.origin}${share_url}`
+      try {
+        await navigator.clipboard.writeText(fullUrl)
+        showToolMessage('Read-only share link copied to clipboard.')
+      } catch {
+        showToolMessage(`Share link: ${fullUrl}`)
+      }
+    } catch {
+      showToolMessage('Could not create a share link.')
+    }
+  }, [page, showToolMessage])
 
   const askCanvex = useCallback(() => {
     const canvas = fabricRef.current
@@ -1100,6 +1149,10 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
             if (message.operation === 'delete') {
               removeElementFromCanvas(message.payload.id)
             }
+            resolveOfflineQueueItem(
+              typeof message.client_operation_id === 'string' ? message.client_operation_id : null,
+              'synced',
+            )
             return
           }
           case 'element:op': {
@@ -1184,7 +1237,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
             return
           }
           case 'element:error': {
-            setStatusMessage(message.detail ?? 'Canvas update failed')
+            const clientOperationId =
+              typeof message.client_operation_id === 'string' ? message.client_operation_id : null
+            if (clientOperationId) {
+              resolveOfflineQueueItem(clientOperationId, 'rejected', message.detail)
+            } else {
+              setStatusMessage(message.detail ?? 'Canvas update failed')
+            }
             return
           }
           default:
@@ -1205,6 +1264,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     flushOfflineQueue,
     page?.id,
     removeElementFromCanvas,
+    resolveOfflineQueueItem,
     sendElementUpdate,
     updateElementOnCanvas,
     user.id,
@@ -1352,6 +1412,10 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
             {isOffline ? 'Working offline' : `${queuedOpsCount} queued`}
           </span>
         )}
+        <button type="button" className="workspace-ai-button" onClick={handleShare} title="Copy a read-only share link">
+          <Link2 size={15} />
+          <span className="workspace-ai-label">Share</span>
+        </button>
         <button type="button" className="workspace-ai-button" onClick={() => setIsAiOpen((prev) => !prev)}>
           <Sparkles size={15} />
           <span className="workspace-ai-label">Ask Canvex</span>
