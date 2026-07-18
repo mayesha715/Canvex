@@ -42,6 +42,7 @@ from app.services.elements import (
     get_page_or_404,
     update_element_state,
 )
+from app.services.redis import assert_no_foreign_lock, get_redis
 from app.services.webhooks import dispatch_webhook_event_for_page
 
 router = APIRouter(tags=["whiteboard"])
@@ -305,6 +306,9 @@ async def update_element(
     db: AsyncSession = Depends(get_db),
 ) -> WhiteboardElement:
     element, _page, membership = access
+    # The REST routes are the fallback mutation path (initial load, offline
+    # sync); they must respect the same Redis element locks as the WS path.
+    await assert_no_foreign_lock(get_redis(), element.id, current_user.id)
     await update_element_state(
         db,
         element=element,
@@ -327,6 +331,7 @@ async def delete_element(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     element, _page, membership = access
+    await assert_no_foreign_lock(get_redis(), element.id, current_user.id)
     await delete_element_state(
         db,
         element=element,

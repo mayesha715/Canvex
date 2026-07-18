@@ -140,7 +140,8 @@ def _draw_element_tile(element: WhiteboardElement) -> tuple[Image.Image, float, 
         tile = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(tile)
         if element_type == "sticky":
-            draw.rectangle([0, 0, width - 1, height - 1], fill=fill or "#fef08a", outline=stroke, width=1)
+            background = str(content.get("backgroundColor") or "") or fill or "#fef08a"
+            draw.rectangle([0, 0, width - 1, height - 1], fill=background, outline=stroke, width=1)
         for i, line in enumerate(lines):
             draw.text((4, i * line_height), line, fill=stroke, font=font)
         return tile, 0, 0

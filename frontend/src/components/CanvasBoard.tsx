@@ -32,6 +32,7 @@ import {
   type OfflineQueueItem,
   type VectorClock,
 } from '../lib/offlineSync'
+import { loadSession } from '../lib/storage'
 import type { AITriggerType, Element, ElementType, PageSummary, User } from '../types'
 
 type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'sticky'
@@ -51,7 +52,12 @@ type CursorState = {
   color: string
   x: number
   y: number
+  updatedAt: number
 }
+
+// Remote cursors older than this are pruned; mirrors the server's 5s Redis
+// TTL with a little slack for message latency.
+const CURSOR_STALE_MS = 6000
 
 type CanvasBoardProps = {
   page: PageSummary | null
@@ -106,6 +112,9 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const seqRef = useRef(0)
   const clientIdRef = useRef(getClientId())
   const cursorThrottleRef = useRef<number | null>(null)
+  const wsRetryCountRef = useRef(0)
+  const lockTimersRef = useRef<Map<string, number>>(new Map())
+  const [wsRetryNonce, setWsRetryNonce] = useState(0)
   const [tool, setTool] = useState<Tool>('select')
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected'>(
     'disconnected',
@@ -224,9 +233,18 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     strokeWidth: obj.strokeWidth ?? 2,
   }), [])
 
-  const toContent = useCallback((obj: CanvasObject) => {
+  const toContent = useCallback((obj: CanvasObject): Record<string, unknown> => {
     if (obj.type === 'textbox') {
-      return { text: (obj as Textbox).text ?? '' }
+      const textbox = obj as Textbox
+      const content: Record<string, unknown> = {
+        text: textbox.text ?? '',
+        width: textbox.width ?? 240,
+        fontSize: textbox.fontSize ?? 20,
+      }
+      if (textbox.backgroundColor) {
+        content.backgroundColor = textbox.backgroundColor
+      }
+      return content
     }
     if (obj.type === 'polyline') {
       return { points: (obj as Polyline).points ?? [] }
@@ -234,6 +252,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     if (obj.type === 'line') {
       const line = obj as Line
       return { points: [line.x1 ?? 0, line.y1 ?? 0, line.x2 ?? 0, line.y2 ?? 0] }
+    }
+    if (obj.type === 'rect') {
+      return { width: obj.width ?? DEFAULT_RECT.width, height: obj.height ?? DEFAULT_RECT.height }
+    }
+    if (obj.type === 'ellipse') {
+      const ellipse = obj as Ellipse
+      return { rx: ellipse.rx ?? DEFAULT_ELLIPSE.rx, ry: ellipse.ry ?? DEFAULT_ELLIPSE.ry }
     }
     return {}
   }, [])
@@ -387,12 +412,17 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       case 'math':
       case 'sticky': {
         const text = String(element.content.text ?? 'Text')
+        const backgroundColor = String(
+          element.content.backgroundColor ?? (element.type === 'sticky' ? '#fef3c7' : ''),
+        )
         const textbox = new Textbox(text, {
           ...base,
           width: Number(element.content.width ?? 240),
           fontSize: Number(element.content.fontSize ?? 20),
           fill: element.style.fill ?? '#e2e8f0',
           stroke: element.style.stroke ?? '#0f172a',
+          backgroundColor,
+          padding: element.type === 'sticky' ? 12 : 0,
         })
         return textbox as CanvasObject
       }
@@ -1101,19 +1131,33 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   useEffect(() => {
     const pageId = page?.id
     if (!pageId) return
+    let closedByCleanup = false
+    let retryTimer: number | null = null
+    const lockTimers = lockTimersRef.current
     const wsUrl = new URL(`/ws/${pageId}`, import.meta.env.VITE_API_URL ?? 'http://localhost:8000')
     wsUrl.protocol = wsUrl.protocol.replace('http', 'ws')
-    wsUrl.searchParams.set('token', accessToken)
+    // Prefer the freshest stored token: the axios interceptor rotates the
+    // session in localStorage, while the accessToken prop only changes on a
+    // full re-login.
+    wsUrl.searchParams.set('token', loadSession()?.accessToken ?? accessToken)
     const socket = new WebSocket(wsUrl.toString())
     wsRef.current = socket
     setConnectionState('connecting')
 
     socket.onopen = () => {
+      wsRetryCountRef.current = 0
       setConnectionState('connected')
       window.setTimeout(() => flushOfflineQueue(), 0)
     }
     socket.onclose = () => {
       setConnectionState('disconnected')
+      if (closedByCleanup) return
+      // Auto-reconnect with capped exponential backoff (1s → 16s). Without
+      // this, a dropped socket left the page dead until it was re-opened, and
+      // queued offline work was never replayed.
+      const attempt = (wsRetryCountRef.current += 1)
+      const delayMs = Math.min(16000, 1000 * 2 ** Math.min(attempt - 1, 4))
+      retryTimer = window.setTimeout(() => setWsRetryNonce((nonce) => nonce + 1), delayMs)
     }
     socket.onerror = () => {
       setConnectionState('disconnected')
@@ -1167,17 +1211,43 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
             return
           }
           case 'element:lock': {
-            const lockPayload = message.payload as { element_id: string; locked_by: string }
+            const lockPayload = message.payload as { element_id: string; locked_by: string; ttl_s?: number }
             const obj = objectsById.current.get(lockPayload.element_id)
             if (obj && lockPayload.locked_by !== user.id) {
               obj.selectable = false
               obj.opacity = 0.6
               fabricRef.current?.renderAll()
+              // The server lock is a Redis key with a TTL; an explicit unlock
+              // is only broadcast when the locker disconnects. Mirror the TTL
+              // locally so the element doesn't stay frozen forever once the
+              // lock silently expires.
+              const existingTimer = lockTimersRef.current.get(lockPayload.element_id)
+              if (existingTimer) {
+                window.clearTimeout(existingTimer)
+              }
+              const ttlMs = (lockPayload.ttl_s ?? 10) * 1000
+              lockTimersRef.current.set(
+                lockPayload.element_id,
+                window.setTimeout(() => {
+                  lockTimersRef.current.delete(lockPayload.element_id)
+                  const lockedObj = objectsById.current.get(lockPayload.element_id)
+                  if (lockedObj) {
+                    lockedObj.selectable = true
+                    lockedObj.opacity = 1
+                    fabricRef.current?.renderAll()
+                  }
+                }, ttlMs),
+              )
             }
             return
           }
           case 'element:unlock': {
             const lockPayload = message.payload as { element_id: string }
+            const lockTimer = lockTimersRef.current.get(lockPayload.element_id)
+            if (lockTimer) {
+              window.clearTimeout(lockTimer)
+              lockTimersRef.current.delete(lockPayload.element_id)
+            }
             const obj = objectsById.current.get(lockPayload.element_id)
             if (obj) {
               obj.selectable = true
@@ -1203,6 +1273,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
                 x: cursorPayload.x,
                 y: cursorPayload.y,
                 color: cursorPayload.color ?? colorFromId(cursorPayload.user_id),
+                updatedAt: Date.now(),
               },
             }))
             return
@@ -1255,6 +1326,12 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     }
 
     return () => {
+      closedByCleanup = true
+      if (retryTimer) {
+        window.clearTimeout(retryTimer)
+      }
+      lockTimers.forEach((timer) => window.clearTimeout(timer))
+      lockTimers.clear()
       socket.close()
       wsRef.current = null
     }
@@ -1269,6 +1346,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     updateElementOnCanvas,
     user.id,
     writeServerElementToYjs,
+    wsRetryNonce,
   ])
 
   useEffect(() => {
@@ -1328,9 +1406,29 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   }, [statusMessage])
 
   useEffect(() => {
-    if (!isOffline) {
+    if (!page?.id) return
+    // A user who simply stops moving never triggers presence:leave, so sweep
+    // out cursors that haven't been refreshed within the server-side TTL.
+    const interval = window.setInterval(() => {
+      setCursors((prev) => {
+        const now = Date.now()
+        const fresh = Object.entries(prev).filter(([, cursor]) => now - cursor.updatedAt <= CURSOR_STALE_MS)
+        return fresh.length === Object.keys(prev).length ? prev : Object.fromEntries(fresh)
+      })
+    }, 2000)
+    return () => window.clearInterval(interval)
+  }, [page?.id])
+
+  useEffect(() => {
+    if (isOffline) return
+    const socket = wsRef.current
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
       flushOfflineQueue()
+      return
     }
+    // Back online but the socket already died: reconnect right away instead
+    // of waiting out the backoff timer (or sitting dead if none is pending).
+    setWsRetryNonce((nonce) => nonce + 1)
   }, [flushOfflineQueue, isOffline])
 
   if (!page) {

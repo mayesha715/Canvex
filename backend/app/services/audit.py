@@ -104,15 +104,21 @@ async def restore_page_to_timestamp(
             target_timestamp=target_timestamp,
             include_deletes=True,
         )
-        if state_event is None:
-            continue
 
         element = await db.get(WhiteboardElement, element_id)
         if element is None:
             continue
 
         before_state = element_state(element)
-        if state_event.operation == EventOperation.DELETE:
+        if state_event is None:
+            # Every event for this element is after the target timestamp: it
+            # did not exist at that point in time, so a page-level restore
+            # removes it (soft delete, logged below like any other change).
+            if element.is_deleted:
+                continue
+            element.is_deleted = True
+            element.updated_at = datetime.now(UTC)
+        elif state_event.operation == EventOperation.DELETE:
             element.is_deleted = True
             element.updated_at = datetime.now(UTC)
         elif state_event.after_state is not None:

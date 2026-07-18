@@ -34,7 +34,7 @@ from app.services.elements import (
     get_page_or_404,
     update_element_state,
 )
-from app.services.redis import get_redis
+from app.services.redis import assert_no_foreign_lock, get_redis, lock_key
 from app.services.webhooks import dispatch_webhook_event_for_page
 from app.services.ws_manager import manager
 
@@ -42,10 +42,6 @@ router = APIRouter(tags=["websocket"])
 
 LOCK_TTL_SECONDS = 10
 CURSOR_TTL_SECONDS = 5
-
-
-def lock_key(element_id: UUID) -> str:
-    return f"lock:{element_id}"
 
 
 def cursor_key(page_id: UUID) -> str:
@@ -76,12 +72,6 @@ async def authenticate_websocket_user(db: AsyncSession, token: str | None) -> Us
 async def get_page_membership(db: AsyncSession, page_id: UUID, user_id: UUID) -> ChannelMember:
     page = await get_page_or_404(db, page_id)
     return await get_channel_membership_for_user(db, page.channel_id, user_id)
-
-
-async def assert_no_foreign_lock(redis: Redis, element_id: UUID, user_id: UUID) -> None:
-    locked_by = await redis.get(lock_key(element_id))
-    if locked_by is not None and locked_by != str(user_id):
-        raise HTTPException(status_code=423, detail="Element is locked by another user")
 
 
 def element_payload(element: object) -> dict[str, Any]:
@@ -287,6 +277,16 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
                 }
                 await redis.hset(cursor_key(page_id), str(user.id), json.dumps(cursor_payload))
                 await redis.expire(cursor_key(page_id), CURSOR_TTL_SECONDS)
+                # Replay bookkeeping (plan 7.5: cursor moves are part of the
+                # session recording). Best-effort, like lock/op recording.
+                with suppress(Exception):
+                    await record_ws_event(
+                        session_id=session_id,
+                        page_id=page_id,
+                        event_type="cursor:move",
+                        payload=cursor_payload,
+                        actor_id=user.id,
+                    )
                 await manager.broadcast(page_id, {"type": "cursor:move", "payload": cursor_payload}, exclude=websocket)
 
             elif message_type == "element:lock":

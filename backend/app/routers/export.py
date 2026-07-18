@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
+import anyio
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,15 +40,17 @@ async def export_page(
         ).all()
     )
 
+    # Pillow rendering is CPU-bound; run it off the event loop so a large page
+    # export doesn't stall every concurrent request and WebSocket.
     if format == "pdf":
         return Response(
-            content=render_page_pdf(elements),
+            content=await anyio.to_thread.run_sync(render_page_pdf, elements),
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{page_id}.pdf"'},
         )
 
     return Response(
-        content=render_page_png(elements),
+        content=await anyio.to_thread.run_sync(render_page_png, elements),
         media_type="image/png",
         headers={"Content-Disposition": f'attachment; filename="{page_id}.png"'},
     )

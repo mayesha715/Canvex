@@ -42,11 +42,16 @@ const makeObject = (element: Element): SharedCanvasObject | null => {
     case 'math':
     case 'sticky': {
       const text = String(element.content.text ?? '')
+      const backgroundColor = String(
+        element.content.backgroundColor ?? (element.type === 'sticky' ? '#fef3c7' : ''),
+      )
       return new Textbox(text, {
         ...base,
         width: Number(element.content.width ?? 240),
         fontSize: Number(element.content.fontSize ?? 20),
         fill: element.style.fill ?? '#0f172a',
+        backgroundColor,
+        padding: element.type === 'sticky' ? 12 : 0,
       }) as SharedCanvasObject
     }
     case 'stroke': {

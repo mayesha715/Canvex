@@ -410,9 +410,24 @@ async def analyze_canvas_job(
                 },
             )
     except Exception as exc:
-        interaction.status = "failed"
-        interaction.error_message = str(exc)
-        interaction.latency_ms = int((time.perf_counter() - started) * 1000)
+        # The failure may be a DB error from the try block (element insert,
+        # embedding flush, ...), which leaves the session in a pending-rollback
+        # state where a plain commit() would raise and the ledger row would be
+        # lost. Roll back first, then write a fresh failure row so every AI
+        # attempt is recorded per plan 9.5 — the rollback discards the
+        # "pending" row added above.
+        await db.rollback()
+        interaction = AIInteraction(
+            page_id=page_id,
+            trigger_element_id=trigger_element_id,
+            trigger_type=trigger_type,
+            canvas_snapshot_url=snapshot_url,
+            prompt_sent=prompt,
+            status="failed",
+            error_message=str(exc),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        db.add(interaction)
         await db.commit()
         raise
 
