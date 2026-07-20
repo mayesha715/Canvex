@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phases 12–13 (production hardening, deployment) have not started.
+Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phase 12 (production hardening) is complete. Phase 13 (deployment) has not started.
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -67,6 +67,13 @@ Phases 0–10 are implemented: audit log querying, session replay, Git-style boa
 - Zoom: toolbar buttons + Ctrl+scroll (25%–400%), with remote cursors projected correctly at any zoom level
 - Members show a green "online now" dot backed by live WebSocket connections (`GET /pages/{id}/presence` now returns user ids)
 - Replay playback is client-paced (server `speed=0` dump): true pause/resume plus scrubbing at any time
+- Rate limiting (Phase 12): 10 req/s per IP general API, 5/min registration, 10/min login, 20/min per user for semantic search and uploads, 100/min WebSocket ops per connection (cursor moves budgeted separately)
+- Structured JSON logging: every line is one JSON object with timestamp, level, request ID (returned as `X-Request-ID`), and user ID when authenticated
+- Security headers on every response (nosniff, DENY framing, HSTS, restrictive CSP outside `/docs`); unhandled errors return a generic 500 carrying the request ID, with the traceback only in server logs
+- Input hardening: 100KB cap on element JSONB payloads (REST and WebSocket paths share the validator), future-dated invite expiry enforcement
+- `/health/live` and `/health/ready` (checks PostgreSQL + Redis, 503 when degraded); SQLAlchemy pool sized 10+20 overflow
+- Startup refuses to boot in `ENVIRONMENT=production` with the default JWT secret or wildcard CORS
+- EXPLAIN-driven indexes: `sessions(page_id, started_at DESC)` and a partial expression index on `whiteboard_elements(content->>'_origin_id')` for branch diffs
 
 ## Local Full-Stack Setup
 

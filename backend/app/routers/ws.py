@@ -42,6 +42,12 @@ router = APIRouter(tags=["websocket"])
 
 LOCK_TTL_SECONDS = 10
 CURSOR_TTL_SECONDS = 5
+# Plan 12.2 flood limits. Mutating/lock messages get the plan's 100/minute;
+# cursor:move must be exempt from that budget — the client legitimately sends
+# up to ~33/s (30ms throttle, plan 5.5) — so it gets its own ceiling just
+# above the maximum a well-behaved client can produce.
+WS_MESSAGES_PER_MINUTE = 100
+WS_CURSOR_MESSAGES_PER_MINUTE = 2400
 
 
 def cursor_key(page_id: UUID) -> str:
@@ -242,9 +248,39 @@ async def canvas_ws(websocket: WebSocket, page_id: UUID) -> None:
             exclude=websocket,
         )
 
+    # Per-connection flood windows (plan 12.2).
+    ws_window_start = datetime.now(UTC)
+    ws_op_count = 0
+    ws_cursor_count = 0
+
     try:
         while True:
             message = await websocket.receive_json()
+
+            now = datetime.now(UTC)
+            if (now - ws_window_start).total_seconds() >= 60:
+                ws_window_start = now
+                ws_op_count = 0
+                ws_cursor_count = 0
+            is_cursor = message.get("type") == "cursor:move"
+            if is_cursor:
+                ws_cursor_count += 1
+                if ws_cursor_count > WS_CURSOR_MESSAGES_PER_MINUTE:
+                    continue  # drop silently; cursors are ephemeral
+            else:
+                ws_op_count += 1
+                if ws_op_count > WS_MESSAGES_PER_MINUTE:
+                    if ws_op_count == WS_MESSAGES_PER_MINUTE + 1:
+                        # Tell the client once per window; drop silently after.
+                        await websocket.send_json(
+                            {
+                                "type": "element:error",
+                                "status": 429,
+                                "detail": "Too many messages — slow down (100/minute limit).",
+                            }
+                        )
+                    continue
+
             protocol = message.get("protocol", "canvas")
             if protocol != "canvas":
                 await websocket.send_json({"type": "error", "status": 400, "detail": "Unsupported websocket protocol"})

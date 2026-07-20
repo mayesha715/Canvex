@@ -6,8 +6,16 @@ from app.config import settings
 
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.environment == "development",
+    # echo=True writes plain text around the JSON logging config (12.4); to
+    # see SQL in development, raise the 'sqlalchemy.engine' logger level
+    # instead — it flows through the structured handler.
+    echo=False,
     pool_pre_ping=True,
+    # Plan 12.5: up to 30 concurrent connections; a timeout here surfacing in
+    # logs means queries are holding connections too long.
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
 )
 
 AsyncSessionLocal = async_sessionmaker(

@@ -4,10 +4,11 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rate_limit import limiter, user_or_ip
 from app.db.session import get_db
 from app.middleware.auth import get_current_user
 from app.models.ai import AIFeedback, AIInteraction
@@ -112,7 +113,9 @@ async def submit_ai_feedback(
 
 
 @router.get("/search", response_model=list[AISearchResult])
+@limiter.limit("20/minute", key_func=user_or_ip)  # plan 12.2: Gemini cost abuse
 async def semantic_search(
+    request: Request,
     q: str = Query(min_length=1, max_length=500),
     channel_id: UUID | None = None,
     limit: int = Query(default=10, ge=1, le=50),

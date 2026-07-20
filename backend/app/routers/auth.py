@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +20,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import get_db
+from app.core.rate_limit import limiter
 from app.middleware.auth import get_current_user
 from app.models.auth import RefreshToken
 from app.models.user import User
@@ -61,7 +62,8 @@ async def revoke_all_refresh_tokens(db: AsyncSession, user_id: UUID) -> None:
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+@limiter.limit("5/minute")  # plan 12.2: prevent account spam
+async def register(request: Request, payload: RegisterRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
     existing = await db.scalar(select(User).where(User.email == payload.email))
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered")
@@ -85,7 +87,9 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 
 
 @router.post("/token", response_model=TokenResponse)
+@limiter.limit("10/minute")  # slow down credential-stuffing attempts
 async def login(
+    request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:

@@ -3,9 +3,10 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 
 from app.config import settings
+from app.core.rate_limit import limiter, user_or_ip
 from app.middleware.auth import get_current_user
 from app.models.user import User
 
@@ -24,7 +25,9 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
 
 @router.post("/uploads", status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/minute", key_func=user_or_ip)  # storage abuse
 async def upload_image(
+    request: Request,
     file: UploadFile,
     _current_user: User = Depends(get_current_user),
 ) -> dict[str, str]:

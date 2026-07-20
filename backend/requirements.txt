@@ -14,3 +14,4 @@ pgvector
 pillow
 httpx
 python-multipart
+slowapi
