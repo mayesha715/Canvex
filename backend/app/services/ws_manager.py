@@ -33,6 +33,16 @@ class ConnectionManager:
         self.read_only_connections.discard(websocket)
         return self.connection_locks.pop(websocket, set())
 
+    def users_in_page(self, page_id: UUID) -> set[UUID]:
+        """Authenticated users currently connected to a page's room.
+        Share-link viewers (read-only, anonymous) are excluded."""
+        return {
+            user_id
+            for connection in self.rooms.get(page_id, set())
+            if connection not in self.read_only_connections
+            and (user_id := self.connection_users.get(connection)) is not None
+        }
+
     def has_active_editors(self, page_id: UUID) -> bool:
         """True if any non-read-only connection remains in the room. Used to
         decide whether a page's replay session should end — a lingering

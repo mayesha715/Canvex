@@ -1,4 +1,4 @@
-import { Canvas, Ellipse, FabricObject, Line, Polyline, Rect, Textbox } from 'fabric'
+import { Canvas, Ellipse, FabricImage, FabricObject, Line, Path, PencilBrush, Point, Polyline, Rect, Textbox } from 'fabric'
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
@@ -9,19 +9,23 @@ import {
   Image,
   Link2,
   Move,
+  MoveUpRight,
   PenLine,
   RectangleHorizontal,
   Redo2,
+  Sigma,
   Sparkles,
   StickyNote,
   Text,
   ThumbsDown,
   ThumbsUp,
   Undo2,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { createShareLink, getPresenceCount, listElements, listPageAiLog, submitAIFeedback } from '../lib/api'
+import { createShareLink, getPresenceCount, listElements, listPageAiLog, submitAIFeedback, uploadImage } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import {
   getClientId,
@@ -35,7 +39,7 @@ import {
 import { loadSession } from '../lib/storage'
 import type { AITriggerType, Element, ElementType, PageSummary, User } from '../types'
 
-type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'sticky'
+type Tool = 'select' | 'pen' | 'rect' | 'ellipse' | 'arrow' | 'text' | 'sticky'
 
 type CanvasObject = FabricObject & {
   elementId?: string
@@ -44,7 +48,26 @@ type CanvasObject = FabricObject & {
   localCreateId?: string
   syncLocalId?: string
   pendingSync?: boolean
+  canvexImageUrl?: string
 }
+
+type ElementSnapshot = {
+  type: ElementType
+  transform: { x: number; y: number; scaleX: number; scaleY: number; rotation: number }
+  style: Record<string, unknown>
+  content: Record<string, unknown>
+}
+
+type TransformSnapshot = Pick<FabricObject, 'left' | 'top' | 'scaleX' | 'scaleY' | 'angle'>
+
+// Invertible history ops: applying one performs the change AND yields its own
+// inverse, so undo/redo are the same machinery walking two stacks.
+type HistoryAction =
+  | { op: 'remove'; obj: CanvasObject }
+  | { op: 'insert'; snapshot: ElementSnapshot }
+  | { op: 'setTransform'; obj: CanvasObject; props: TransformSnapshot; prev: TransformSnapshot }
+
+const HISTORY_LIMIT = 50
 
 type CursorState = {
   userId: string
@@ -63,12 +86,16 @@ type CanvasBoardProps = {
   page: PageSummary | null
   user: User
   accessToken: string
+  // Bumping nonce re-triggers the flash even for the same element id.
+  highlightElement?: { id: string; nonce: number } | null
 }
 
 const TOOL_LABELS: Record<Tool, string> = {
   select: 'Select',
+  pen: 'Pen',
   rect: 'Rectangle',
   ellipse: 'Ellipse',
+  arrow: 'Arrow',
   text: 'Text',
   sticky: 'Sticky Note',
 }
@@ -91,7 +118,7 @@ const shouldAttachAISnapshot = (element: { type: ElementType; content: Record<st
   return AI_TEXT_PATTERN.test(text)
 }
 
-const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
+const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const fabricRef = useRef<Canvas | null>(null)
@@ -114,6 +141,15 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const cursorThrottleRef = useRef<number | null>(null)
   const wsRetryCountRef = useRef(0)
   const lockTimersRef = useRef<Map<string, number>>(new Map())
+  const undoStackRef = useRef<HistoryAction[]>([])
+  const redoStackRef = useRef<HistoryAction[]>([])
+  const suppressHistoryRef = useRef(false)
+  const performUndoRef = useRef<() => void>(() => {})
+  const performRedoRef = useRef<() => void>(() => {})
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [historyVersion, setHistoryVersion] = useState(0)
+  const [viewport, setViewport] = useState({ zoom: 1, tx: 0, ty: 0 })
+  const [isUploadingImage, setIsUploadingImage] = useState(false)
   const [wsRetryNonce, setWsRetryNonce] = useState(0)
   const [tool, setTool] = useState<Tool>('select')
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected'>(
@@ -124,6 +160,8 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [strokeColor, setStrokeColor] = useState('#0f172a')
   const [isAiOpen, setIsAiOpen] = useState(false)
+  const [isMathOpen, setIsMathOpen] = useState(false)
+  const [mathInput, setMathInput] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
   const [aiMessages, setAiMessages] = useState<AIMessage[]>([])
   const [isLoadingPage, setIsLoadingPage] = useState(false)
@@ -253,6 +291,14 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       const line = obj as Line
       return { points: [line.x1 ?? 0, line.y1 ?? 0, line.x2 ?? 0, line.y2 ?? 0] }
     }
+    if (obj.type === 'image') {
+      const image = obj as FabricImage & CanvasObject
+      return {
+        url: image.canvexImageUrl ?? image.getSrc(),
+        width: obj.width ?? 240,
+        height: obj.height ?? 180,
+      }
+    }
     if (obj.type === 'rect') {
       return { width: obj.width ?? DEFAULT_RECT.width, height: obj.height ?? DEFAULT_RECT.height }
     }
@@ -266,6 +312,8 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
   const resolveElementType = useCallback((obj: CanvasObject): ElementType => {
     if (obj.canvexType) return obj.canvexType
     switch (obj.type) {
+      case 'image':
+        return 'image'
       case 'rect':
         return 'rect'
       case 'ellipse':
@@ -442,6 +490,24 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
           points[3] ?? 0,
         ]
         return new Line(linePoints, { ...base, fill: 'transparent' }) as CanvasObject
+      }
+      case 'image': {
+        const url = String(element.content.url ?? '')
+        if (!url) return null
+        const width = Number(element.content.width ?? 240)
+        const height = Number(element.content.height ?? 180)
+        const imgEl = document.createElement('img')
+        imgEl.crossOrigin = 'anonymous'
+        const image = new FabricImage(imgEl, { ...base, width, height }) as CanvasObject
+        image.canvexImageUrl = url
+        // The bitmap loads async; repaint once it arrives.
+        imgEl.onload = () => {
+          image.set({ width: imgEl.naturalWidth || width, height: imgEl.naturalHeight || height })
+          image.setCoords()
+          image.canvas?.requestRenderAll()
+        }
+        imgEl.src = url
+        return image
       }
       default:
         return null
@@ -772,6 +838,252 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     setStatusMessage(message)
   }, [])
 
+  // ── Undo / redo ────────────────────────────────────────────────
+
+  const snapshotOf = useCallback(
+    (obj: CanvasObject): ElementSnapshot => ({
+      type: resolveElementType(obj),
+      transform: toTransform(obj),
+      style: toStyle(obj) as Record<string, unknown>,
+      content: toContent(obj),
+    }),
+    [resolveElementType, toContent, toStyle, toTransform],
+  )
+
+  const pushHistory = useCallback((action: HistoryAction) => {
+    if (suppressHistoryRef.current) return
+    undoStackRef.current.push(action)
+    if (undoStackRef.current.length > HISTORY_LIMIT) {
+      undoStackRef.current.shift()
+    }
+    redoStackRef.current = []
+    setHistoryVersion((version) => version + 1)
+  }, [])
+
+  // Applies a history op through the normal canvas mutation paths (so the
+  // server sync fires) and returns the op that would revert it.
+  const applyHistoryOp = useCallback(
+    (action: HistoryAction): HistoryAction | null => {
+      const canvas = fabricRef.current
+      if (!canvas) return null
+      if (action.op === 'remove') {
+        if (!canvas.getObjects().includes(action.obj)) return null
+        const inverse: HistoryAction = { op: 'insert', snapshot: snapshotOf(action.obj) }
+        canvas.remove(action.obj)
+        canvas.discardActiveObject()
+        canvas.requestRenderAll()
+        return inverse
+      }
+      if (action.op === 'insert') {
+        const { snapshot } = action
+        const element: Element = {
+          id: '',
+          page_id: pageRef.current?.id ?? '',
+          type: snapshot.type,
+          transform: snapshot.transform,
+          style: snapshot.style as Element['style'],
+          content: snapshot.content,
+          is_deleted: false,
+          created_at: '',
+          updated_at: '',
+        }
+        const obj = makeObject(element)
+        if (!obj) return null
+        obj.canvexType = snapshot.type
+        canvas.add(obj)
+        canvas.requestRenderAll()
+        return { op: 'remove', obj }
+      }
+      const { obj, props, prev } = action
+      if (!canvas.getObjects().includes(obj)) return null
+      obj.set(props)
+      obj.setCoords()
+      canvas.requestRenderAll()
+      sendElementUpdate(obj)
+      return { op: 'setTransform', obj, props: prev, prev: props }
+    },
+    [makeObject, sendElementUpdate, snapshotOf],
+  )
+
+  useEffect(() => {
+    const step = (from: HistoryAction[], to: HistoryAction[]) => {
+      const action = from.pop()
+      if (!action) return
+      suppressHistoryRef.current = true
+      let inverse: HistoryAction | null = null
+      try {
+        inverse = applyHistoryOp(action)
+      } finally {
+        suppressHistoryRef.current = false
+      }
+      if (inverse) {
+        to.push(inverse)
+      }
+      setHistoryVersion((version) => version + 1)
+    }
+    performUndoRef.current = () => step(undoStackRef.current, redoStackRef.current)
+    performRedoRef.current = () => step(redoStackRef.current, undoStackRef.current)
+  }, [applyHistoryOp])
+
+  // ── Zoom ───────────────────────────────────────────────────────
+
+  const zoomBy = useCallback((factor: number) => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    const next = Math.min(4, Math.max(0.25, canvas.getZoom() * factor))
+    canvas.zoomToPoint(new Point(canvas.getWidth() / 2, canvas.getHeight() / 2), next)
+    const vpt = canvas.viewportTransform
+    setViewport({ zoom: next, tx: vpt?.[4] ?? 0, ty: vpt?.[5] ?? 0 })
+    canvas.requestRenderAll()
+  }, [])
+
+  const resetZoom = useCallback(() => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0])
+    setViewport({ zoom: 1, tx: 0, ty: 0 })
+    canvas.requestRenderAll()
+  }, [])
+
+  // Scene-space point at the center of the current view (zoom/pan aware).
+  const sceneCenter = useCallback((): { x: number; y: number } => {
+    const canvas = fabricRef.current
+    if (!canvas) return { x: 200, y: 200 }
+    const zoom = canvas.getZoom()
+    const vpt = canvas.viewportTransform
+    return {
+      x: (canvas.getWidth() / 2 - (vpt?.[4] ?? 0)) / zoom,
+      y: (canvas.getHeight() / 2 - (vpt?.[5] ?? 0)) / zoom,
+    }
+  }, [])
+
+  // ── Image upload ───────────────────────────────────────────────
+
+  const handleImageSelected = useCallback(
+    async (file: File | null) => {
+      const canvas = fabricRef.current
+      if (!file || !canvas || !pageRef.current) return
+      setIsUploadingImage(true)
+      try {
+        const { url } = await uploadImage(file)
+        const imgEl = document.createElement('img')
+        imgEl.crossOrigin = 'anonymous'
+        await new Promise<void>((resolve, reject) => {
+          imgEl.onload = () => resolve()
+          imgEl.onerror = () => reject(new Error('image failed to load'))
+          imgEl.src = url
+        })
+        const naturalWidth = imgEl.naturalWidth || 240
+        const scale = Math.min(1, 320 / naturalWidth)
+        const center = sceneCenter()
+        // Center origin (Fabric v7): left/top place the image's midpoint.
+        const image = new FabricImage(imgEl, {
+          left: center.x,
+          top: center.y,
+          scaleX: scale,
+          scaleY: scale,
+        }) as CanvasObject
+        image.canvexType = 'image'
+        image.canvexImageUrl = url
+        canvas.add(image)
+        canvas.setActiveObject(image)
+        canvas.requestRenderAll()
+        showToolMessage('Image added to the canvas.')
+      } catch {
+        showToolMessage('Image upload failed — PNG/JPEG/WebP/GIF up to 5 MB.')
+      } finally {
+        setIsUploadingImage(false)
+      }
+    },
+    [sceneCenter, showToolMessage],
+  )
+
+  // Flash a halo around an element (e.g. clicked in the audit log panel).
+  useEffect(() => {
+    if (!highlightElement) return
+    const canvas = fabricRef.current
+    if (!canvas) return
+    const obj = objectsById.current.get(highlightElement.id)
+    if (!obj) {
+      showToolMessage('That element is no longer on this page.')
+      return
+    }
+    // Bounds from aCoords (scene-plane corners), NOT getBoundingRect —
+    // the latter is viewport-dependent, which misplaces the halo when zoomed.
+    obj.setCoords()
+    const corners = obj.aCoords ? Object.values(obj.aCoords) : []
+    if (corners.length === 0) return
+    const xs = corners.map((corner) => corner.x)
+    const ys = corners.map((corner) => corner.y)
+    const left = Math.min(...xs)
+    const top = Math.min(...ys)
+    const halo = new Rect({
+      // Fabric v7 defaults to center origin; the halo is positioned by its
+      // top-left corner, so pin the origin explicitly.
+      originX: 'left',
+      originY: 'top',
+      left: left - 8,
+      top: top - 8,
+      width: Math.max(...xs) - left + 16,
+      height: Math.max(...ys) - top + 16,
+      fill: 'rgba(70, 72, 212, 0.10)',
+      stroke: '#4648d4',
+      strokeWidth: 2,
+      strokeDashArray: [6, 4],
+      rx: 10,
+      ry: 10,
+      selectable: false,
+      evented: false,
+    }) as CanvasObject
+    // isRemote + applyingRemote keep the decorative halo out of the
+    // object:added/removed sync handlers — it must never become an element.
+    halo.isRemote = true
+    applyingRemote.current = true
+    canvas.add(halo)
+    applyingRemote.current = false
+    canvas.requestRenderAll()
+    const removeHalo = () => {
+      // On page switch the canvas is disposed before App clears the
+      // highlight state — never touch a canvas that is no longer live.
+      if (fabricRef.current !== canvas) return
+      applyingRemote.current = true
+      canvas.remove(halo)
+      applyingRemote.current = false
+      canvas.requestRenderAll()
+    }
+    const timer = window.setTimeout(removeHalo, 1800)
+    return () => {
+      window.clearTimeout(timer)
+      removeHalo()
+    }
+  }, [highlightElement, showToolMessage])
+
+  const handleMathSubmit = useCallback(() => {
+    const equation = mathInput.trim()
+    const canvas = fabricRef.current
+    if (!equation || !canvas) return
+    const center = sceneCenter()
+    // Center origin (Fabric v7): left/top place the textbox's midpoint.
+    const textbox = new Textbox(equation, {
+      left: center.x,
+      top: center.y,
+      width: 280,
+      fontSize: 24,
+      fill: strokeColorRef.current,
+      backgroundColor: '#eef2ff',
+      padding: 10,
+    }) as CanvasObject
+    textbox.canvexType = 'math'
+    // Plain canvas.add: the object:added handler sends the create op, and the
+    // backend's math trigger enqueues the AI analysis for this element.
+    canvas.add(textbox)
+    canvas.setActiveObject(textbox)
+    canvas.requestRenderAll()
+    setMathInput('')
+    setIsMathOpen(false)
+    showToolMessage('Equation placed — Canvex AI is analyzing it…')
+  }, [mathInput, sceneCenter, showToolMessage])
+
   const handleShare = useCallback(async () => {
     if (!page) {
       showToolMessage('Select a page before creating a share link.')
@@ -847,6 +1159,9 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       setStrokeColor(color)
       const canvas = fabricRef.current
       if (!canvas) return
+      if (canvas.freeDrawingBrush) {
+        canvas.freeDrawingBrush.color = color
+      }
       const activeObjects = canvas.getActiveObjects() as CanvasObject[]
       if (activeObjects.length === 0) return
       activeObjects.forEach((obj) => {
@@ -882,7 +1197,16 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     activeToolRef.current = tool
     const canvas = fabricRef.current
     if (!canvas) return
-    canvas.isDrawingMode = false
+    canvas.isDrawingMode = tool === 'pen'
+    if (tool === 'pen') {
+      const brush =
+        canvas.freeDrawingBrush instanceof PencilBrush
+          ? canvas.freeDrawingBrush
+          : new PencilBrush(canvas)
+      brush.color = strokeColorRef.current
+      brush.width = 3
+      canvas.freeDrawingBrush = brush
+    }
   }, [tool])
 
   useEffect(() => {
@@ -897,6 +1221,8 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     })
     canvas.backgroundColor = 'rgba(245, 244, 236, 0)'
     fabricRef.current = canvas
+    // Debug/test hook: lets integration tests inspect canvas geometry.
+    ;(window as unknown as Record<string, unknown>).__canvexCanvas = canvas
 
     const resize = () => {
       if (!containerRef.current) return
@@ -910,6 +1236,27 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     window.addEventListener('resize', resize)
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const typing =
+        document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLTextAreaElement ||
+        document.activeElement?.getAttribute('contenteditable') === 'true'
+      if ((event.ctrlKey || event.metaKey) && !typing) {
+        const key = event.key.toLowerCase()
+        if (key === 'z') {
+          event.preventDefault()
+          if (event.shiftKey) {
+            performRedoRef.current()
+          } else {
+            performUndoRef.current()
+          }
+          return
+        }
+        if (key === 'y') {
+          event.preventDefault()
+          performRedoRef.current()
+          return
+        }
+      }
       if (event.key !== 'Delete' && event.key !== 'Backspace') return
       const active = document.activeElement
       if (
@@ -926,8 +1273,54 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
 
     window.addEventListener('keydown', handleKeyDown)
 
+    // Reset the viewport for the freshly created canvas of this page.
+    setViewport({ zoom: 1, tx: 0, ty: 0 })
+
+    canvas.on('mouse:wheel', (event) => {
+      const wheel = event.e as WheelEvent
+      if (!wheel.ctrlKey) return
+      wheel.preventDefault()
+      wheel.stopPropagation()
+      const factor = wheel.deltaY > 0 ? 0.9 : 1.1
+      const next = Math.min(4, Math.max(0.25, canvas.getZoom() * factor))
+      canvas.zoomToPoint(new Point(wheel.offsetX, wheel.offsetY), next)
+      const vpt = canvas.viewportTransform
+      setViewport({ zoom: next, tx: vpt?.[4] ?? 0, ty: vpt?.[5] ?? 0 })
+      canvas.requestRenderAll()
+    })
+
+    // PencilBrush finishes by adding a Path; convert it into our polyline
+    // 'stroke' element (the Path itself is skipped by every sync handler).
+    canvas.on('path:created', (event) => {
+      const path = (event as { path?: Path }).path
+      if (!path) return
+      const commands = (path.path ?? []) as unknown as Array<Array<string | number>>
+      const points: Array<{ x: number; y: number }> = []
+      commands.forEach((command) => {
+        const numbers = command.filter((value): value is number => typeof value === 'number')
+        if (numbers.length >= 2) {
+          points.push({ x: numbers[numbers.length - 2], y: numbers[numbers.length - 1] })
+        }
+      })
+      applyingRemote.current = true
+      canvas.remove(path)
+      applyingRemote.current = false
+      if (points.length < 2) {
+        canvas.requestRenderAll()
+        return
+      }
+      const polyline = new Polyline(points, {
+        stroke: (path.stroke as string) ?? strokeColorRef.current,
+        strokeWidth: path.strokeWidth ?? 3,
+        fill: 'transparent',
+      }) as CanvasObject
+      polyline.canvexType = 'stroke'
+      canvas.add(polyline)
+      canvas.requestRenderAll()
+    })
+
     canvas.on('mouse:down', (event) => {
-      const pointer = canvas.getViewportPoint(event.e)
+      const pointer = canvas.getScenePoint(event.e)
       if (activeToolRef.current === 'rect') {
         const rect = new Rect({
           left: pointer.x,
@@ -958,6 +1351,17 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         canvas.setActiveObject(ellipse)
         setTool('select')
       }
+      if (activeToolRef.current === 'arrow') {
+        const line = new Line([pointer.x, pointer.y, pointer.x + 120, pointer.y - 40], {
+          stroke: strokeColorRef.current,
+          strokeWidth: 2,
+          fill: 'transparent',
+        }) as CanvasObject
+        line.canvexType = 'arrow'
+        canvas.add(line)
+        canvas.setActiveObject(line)
+        setTool('select')
+      }
       if (activeToolRef.current === 'text' || activeToolRef.current === 'sticky') {
         const isSticky = activeToolRef.current === 'sticky'
         const textbox = new Textbox(isSticky ? 'Sticky note' : 'Text', {
@@ -984,7 +1388,7 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       cursorThrottleRef.current = window.setTimeout(() => {
         cursorThrottleRef.current = null
       }, 30)
-      const pointer = canvas.getViewportPoint(event.e)
+      const pointer = canvas.getScenePoint(event.e)
       sendMessage({ type: 'cursor:move', payload: { x: pointer.x, y: pointer.y, color: cursorColor } })
     })
 
@@ -1005,20 +1409,40 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     canvas.on('object:added', (event) => {
       const obj = event.target as CanvasObject | undefined
       if (!obj || applyingRemote.current || obj.isRemote) return
+      if (obj.type === 'path') return
       if (!obj.elementId) {
         sendElementCreate(obj)
       }
+      pushHistory({ op: 'remove', obj })
     })
 
     canvas.on('object:modified', (event) => {
       const obj = event.target as CanvasObject | undefined
       if (!obj || applyingRemote.current || obj.isRemote) return
+      if (obj.type === 'path') return
       sendElementUpdate(obj)
+      const original = event.transform?.original as Partial<TransformSnapshot> | undefined
+      if (original) {
+        pushHistory({
+          op: 'setTransform',
+          obj,
+          props: {
+            left: original.left ?? obj.left,
+            top: original.top ?? obj.top,
+            scaleX: original.scaleX ?? obj.scaleX,
+            scaleY: original.scaleY ?? obj.scaleY,
+            angle: original.angle ?? obj.angle,
+          },
+          prev: { left: obj.left, top: obj.top, scaleX: obj.scaleX, scaleY: obj.scaleY, angle: obj.angle },
+        })
+      }
     })
 
     canvas.on('object:removed', (event) => {
       const obj = event.target as CanvasObject | undefined
       if (!obj || applyingRemote.current || obj.isRemote) return
+      if (obj.type === 'path') return
+      pushHistory({ op: 'insert', snapshot: snapshotOf(obj) })
       sendElementDelete(obj)
     })
 
@@ -1068,11 +1492,13 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
     deleteActiveObjects,
     ensureLocalId,
     page?.id,
+    pushHistory,
     sendElementCreate,
     sendElementDelete,
     sendElementUpdate,
     sendLock,
     sendMessage,
+    snapshotOf,
   ])
 
   useEffect(() => {
@@ -1534,9 +1960,12 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         <div className="workspace-tool-divider" />
         <button
           type="button"
-          className="workspace-tool-button ghost"
+          className={`workspace-tool-button ${tool === 'pen' ? 'active' : ''}`}
           title="Pen"
-          onClick={() => showToolMessage('Freehand pen is planned for the drawing phase. Use shapes and text for now.')}
+          onClick={() => {
+            setTool('pen')
+            showToolMessage('Draw freely — switch back to Select when done.')
+          }}
         >
           <PenLine size={16} />
         </button>
@@ -1578,6 +2007,14 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         </button>
         <button
           type="button"
+          className={`workspace-tool-button ${tool === 'arrow' ? 'active' : ''}`}
+          onClick={() => setTool('arrow')}
+          title={TOOL_LABELS.arrow}
+        >
+          <MoveUpRight size={16} />
+        </button>
+        <button
+          type="button"
           className={`workspace-tool-button ${tool === 'text' ? 'active' : ''}`}
           onClick={() => setTool('text')}
           title={TOOL_LABELS.text}
@@ -1597,12 +2034,32 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         </button>
         <button
           type="button"
-          className="workspace-tool-button ghost"
+          className={`workspace-tool-button ${isMathOpen ? 'active' : ''}`}
+          title="Math input"
+          onClick={() => setIsMathOpen(true)}
+        >
+          <Sigma size={16} />
+        </button>
+        <button
+          type="button"
+          className={`workspace-tool-button ghost ${isUploadingImage ? 'active' : ''}`}
           title="Image"
-          onClick={() => showToolMessage('Image uploads are coming soon.')}
+          disabled={isUploadingImage}
+          onClick={() => fileInputRef.current?.click()}
         >
           <Image size={16} />
         </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0] ?? null
+            event.target.value = ''
+            handleImageSelected(file)
+          }}
+        />
         <div className="workspace-tool-divider" />
         <div className="workspace-swatches">
           {['#0f172a', '#2563eb', '#ef4444', '#22c55e', '#facc15', '#818cf8'].map((color) => (
@@ -1619,22 +2076,83 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
         <div className="workspace-tool-divider hidden sm:block" />
         <button
           type="button"
-          className="workspace-tool-button ghost hidden sm:flex"
-          title="Undo"
-          onClick={() => showToolMessage('Undo is coming soon.')}
+          className="workspace-tool-button ghost hidden sm:flex disabled:opacity-40"
+          title="Undo (Ctrl+Z)"
+          disabled={historyVersion >= 0 && undoStackRef.current.length === 0}
+          onClick={() => performUndoRef.current()}
         >
           <Undo2 size={16} />
         </button>
         <button
           type="button"
-          className="workspace-tool-button ghost hidden sm:flex"
-          title="Redo"
-          onClick={() => showToolMessage('Redo is coming soon.')}
+          className="workspace-tool-button ghost hidden sm:flex disabled:opacity-40"
+          title="Redo (Ctrl+Shift+Z)"
+          disabled={historyVersion >= 0 && redoStackRef.current.length === 0}
+          onClick={() => performRedoRef.current()}
         >
           <Redo2 size={16} />
         </button>
+        <div className="workspace-tool-divider hidden sm:block" />
+        <button
+          type="button"
+          className="workspace-tool-button ghost hidden sm:flex"
+          title="Zoom out (Ctrl+scroll)"
+          onClick={() => zoomBy(1 / 1.2)}
+        >
+          <ZoomOut size={16} />
+        </button>
+        <button
+          type="button"
+          className="hidden w-12 shrink-0 text-center font-mono text-[11px] text-slate-500 hover:text-indigo-600 sm:block"
+          title="Reset zoom"
+          onClick={resetZoom}
+        >
+          {Math.round(viewport.zoom * 100)}%
+        </button>
+        <button
+          type="button"
+          className="workspace-tool-button ghost hidden sm:flex"
+          title="Zoom in (Ctrl+scroll)"
+          onClick={() => zoomBy(1.2)}
+        >
+          <ZoomIn size={16} />
+        </button>
       </div>
 
+      {isMathOpen && (
+        <div className="workspace-modal-backdrop" onClick={() => setIsMathOpen(false)}>
+          <div className="workspace-modal max-w-md" onClick={(event) => event.stopPropagation()}>
+            <header className="border-b border-slate-200/80 px-6 py-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Math input</p>
+              <h3 className="font-reading-serif text-xl text-slate-950">Write an equation</h3>
+            </header>
+            <div className="space-y-3 px-6 py-5">
+              <input
+                autoFocus
+                className="workspace-input font-mono text-lg"
+                placeholder="2x + 5 = 13"
+                value={mathInput}
+                onChange={(event) => setMathInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleMathSubmit()
+                }}
+              />
+              <p className="text-xs text-slate-400">
+                The equation lands on the canvas as a math element and Canvex AI solves it in place.
+              </p>
+              <button
+                type="button"
+                onClick={handleMathSubmit}
+                disabled={!mathInput.trim()}
+                className="workspace-action-button w-full justify-center disabled:opacity-50"
+              >
+                <Sigma size={15} />
+                Place on canvas
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {statusMessage && (
         <div className="workspace-status-message">{statusMessage}</div>
       )}
@@ -1645,17 +2163,23 @@ const CanvasBoard = ({ page, user, accessToken }: CanvasBoardProps) => {
       <div ref={containerRef} className="relative h-full overflow-hidden">
         <div className="canvas-surface absolute inset-0"></div>
         <canvas ref={canvasRef} className="relative z-10 h-full w-full"></canvas>
-        {Object.values(cursors).map((cursor) => (
-          <div key={cursor.userId} className="pointer-events-none absolute left-0 top-0">
-            <div
-              className="cursor-dot"
-              style={{ left: cursor.x, top: cursor.y, backgroundColor: cursor.color }}
-            />
-            <div className="cursor-label" style={{ left: cursor.x, top: cursor.y }}>
-              {cursor.displayName}
+        {Object.values(cursors).map((cursor) => {
+          // Cursors travel in scene coordinates; project into this client's
+          // viewport so they stay accurate at any zoom level.
+          const screenX = cursor.x * viewport.zoom + viewport.tx
+          const screenY = cursor.y * viewport.zoom + viewport.ty
+          return (
+            <div key={cursor.userId} className="pointer-events-none absolute left-0 top-0">
+              <div
+                className="cursor-dot"
+                style={{ left: screenX, top: screenY, backgroundColor: cursor.color }}
+              />
+              <div className="cursor-label" style={{ left: screenX, top: screenY }}>
+                {cursor.displayName}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
       {isAiOpen && (
         <aside className="workspace-ai-panel">

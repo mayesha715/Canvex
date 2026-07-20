@@ -437,8 +437,10 @@ async def get_presence(
     page_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> dict[str, int]:
+) -> dict[str, object]:
     membership = await get_page_membership(db, page_id, current_user.id)
     assert_minimum_role(membership, MemberRole.VIEWER)
-    count = await get_redis().hlen(cursor_key(page_id))
-    return {"count": count}
+    # Live WebSocket connections, not the cursor hash: the cursor hash has a
+    # 5s TTL so "online" would evaporate the moment someone stops moving.
+    user_ids = sorted(str(user_id) for user_id in manager.users_in_page(page_id))
+    return {"count": len(user_ids), "user_ids": user_ids}

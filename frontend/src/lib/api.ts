@@ -1,7 +1,25 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { clearSession, loadSession, saveSession } from './storage'
-import type { AIInteraction, AuthSession, ChannelDetail, ChannelListItem, Element, PageSummary, User } from '../types'
+import type {
+  AIInteraction,
+  AuditPageResult,
+  AuthSession,
+  BranchDiff,
+  ChannelDetail,
+  ChannelListItem,
+  Element,
+  EventOperation,
+  Invite,
+  MemberRole,
+  MergeStrategy,
+  MergeSummary,
+  PageAnalytics,
+  PageSummary,
+  ReplayEvent,
+  SessionSummary,
+  User,
+} from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
@@ -138,9 +156,23 @@ export const listElements = async (pageId: string): Promise<Element[]> => {
   return data
 }
 
-export const getPresenceCount = async (pageId: string): Promise<number> => {
+export const getPagePresence = async (
+  pageId: string,
+): Promise<{ count: number; user_ids: string[] }> => {
   const { data } = await apiClient.get(`/pages/${pageId}/presence`)
-  return data.count ?? 0
+  return { count: data.count ?? 0, user_ids: data.user_ids ?? [] }
+}
+
+export const getPresenceCount = async (pageId: string): Promise<number> => {
+  const { count } = await getPagePresence(pageId)
+  return count
+}
+
+export const uploadImage = async (file: File): Promise<{ url: string }> => {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await apiClient.post('/uploads', form)
+  return data
 }
 
 export const listPageAiLog = async (pageId: string): Promise<AIInteraction[]> => {
@@ -172,4 +204,137 @@ export type SharedPageResponse = {
 export const getSharedPage = async (token: string): Promise<SharedPageResponse> => {
   const { data } = await apiClient.get(`/view/${token}`)
   return data
+}
+
+// ── Members & invites (Phase 11.3) ──────────────────────────────
+
+export const createInvite = async (
+  channelId: string,
+  roleOnJoin: MemberRole = 'editor',
+): Promise<Invite> => {
+  const { data } = await apiClient.post(`/channels/${channelId}/invites`, { role_on_join: roleOnJoin })
+  return data
+}
+
+export const acceptInvite = async (code: string): Promise<ChannelListItem> => {
+  const { data } = await apiClient.post(`/invites/${encodeURIComponent(code.trim())}/accept`)
+  return data
+}
+
+export const updateMemberRole = async (channelId: string, userId: string, role: MemberRole) => {
+  const { data } = await apiClient.put(`/channels/${channelId}/members/${userId}`, { role })
+  return data
+}
+
+export const removeMember = async (channelId: string, userId: string) => {
+  await apiClient.delete(`/channels/${channelId}/members/${userId}`)
+}
+
+// ── Audit log (Phase 11.4) ──────────────────────────────────────
+
+export type AuditFilters = {
+  element_id?: string
+  actor_id?: string
+  operation?: EventOperation
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+}
+
+export const listAudit = async (pageId: string, filters: AuditFilters = {}): Promise<AuditPageResult> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/audit`, { params: filters })
+  return data
+}
+
+// ── Branching (Phase 11.5) ──────────────────────────────────────
+
+export const branchPage = async (pageId: string, title?: string): Promise<PageSummary> => {
+  const { data } = await apiClient.post(`/pages/${pageId}/branch`, { title: title || undefined })
+  return data
+}
+
+export const getBranchDiff = async (pageId: string): Promise<BranchDiff> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/diff`)
+  return data
+}
+
+export const mergeBranch = async (pageId: string, strategy: MergeStrategy): Promise<MergeSummary> => {
+  const { data } = await apiClient.post(`/pages/${pageId}/merge`, { strategy })
+  return data
+}
+
+// ── Session replay (Phase 11.6) ─────────────────────────────────
+
+export const listSessions = async (pageId: string): Promise<SessionSummary[]> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/sessions`)
+  return data
+}
+
+// The replay endpoint streams NDJSON with server-side pacing, which axios
+// can't consume incrementally in the browser — use fetch + a reader.
+export const streamReplay = async (
+  sessionId: string,
+  // 0 = no server pacing (instant dump for client-driven playback)
+  speed: 0 | 1 | 2 | 4,
+  onEvent: (event: ReplayEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> => {
+  const session = loadSession()
+  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/replay?speed=${speed}`, {
+    headers: session?.accessToken ? { Authorization: `Bearer ${session.accessToken}` } : {},
+    signal,
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`Replay failed (${response.status})`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const emitLine = (line: string) => {
+    if (!line) return
+    try {
+      onEvent(JSON.parse(line) as ReplayEvent)
+    } catch {
+      // skip malformed lines
+    }
+  }
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let newline = buffer.indexOf('\n')
+    while (newline >= 0) {
+      emitLine(buffer.slice(0, newline).trim())
+      buffer = buffer.slice(newline + 1)
+      newline = buffer.indexOf('\n')
+    }
+  }
+  // Flush a final line that arrived without a trailing newline.
+  buffer += decoder.decode()
+  emitLine(buffer.trim())
+}
+
+// ── Analytics (Phase 11 surface for the Phase 10 endpoint) ──────
+
+export const getPageAnalytics = async (pageId: string): Promise<PageAnalytics> => {
+  const { data } = await apiClient.get(`/pages/${pageId}/analytics`)
+  return data
+}
+
+// ── Export (Phase 10.5 endpoints, surfaced in the UI) ───────────
+
+export const downloadPageExport = async (pageId: string, format: 'png' | 'pdf', title: string) => {
+  const { data } = await apiClient.get(`/pages/${pageId}/export`, {
+    params: { format },
+    responseType: 'blob',
+  })
+  const url = URL.createObjectURL(data as Blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${title.replace(/[^\w-]+/g, '_') || 'canvex-page'}.${format}`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }

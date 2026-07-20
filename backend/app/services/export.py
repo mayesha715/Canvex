@@ -189,14 +189,16 @@ def render_page_image(elements: list[WhiteboardElement]) -> Image.Image:
         y = float(transform.get("y", 0) or 0)
         rotation = float(transform.get("rotation", 0) or 0)
 
-        tile, local_x, local_y = _draw_element_tile(element)
+        tile, _local_x, _local_y = _draw_element_tile(element)
         if tile.width <= 0 or tile.height <= 0:
             continue
 
-        # Rotate around the tile's own center, then re-anchor so that center
-        # stays at the same canvas point rotation would leave it at.
-        center_x = x + local_x + tile.width / 2
-        center_y = y + local_y + tile.height / 2
+        # transform.x/y is the element's CENTER: Fabric v7's default origin is
+        # 'center', so left/top as stored by every canvas surface denote the
+        # element's midpoint. Tile margins are symmetric for all element
+        # types, so the tile's center coincides with the element's center.
+        center_x = x
+        center_y = y
         if rotation:
             tile = tile.rotate(-rotation, expand=True, resample=Image.BICUBIC)
         top_left_x = center_x - tile.width / 2

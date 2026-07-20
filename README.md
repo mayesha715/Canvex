@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is partially implemented; Phases 12–13 (production hardening, deployment) have not started.
+Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phases 12–13 (production hardening, deployment) have not started.
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -52,6 +52,21 @@ Phases 0–10 are implemented: audit log querying, session replay, Git-style boa
 - Read-only share links: `POST /pages/{page_id}/share` JWT tokens, a `/view/{token}` viewer page, and a receive-only WebSocket mode
 - Automatic access-token refresh in the frontend API client (single-flight, rotation-aware)
 - WebSocket auto-reconnect with capped backoff, immediate reconnect when the browser comes back online
+- Member management UI: role badges, admin role changes, member removal, invite-code creation and join-by-code
+- Audit log viewer panel with operation/member filters and pagination
+- Branches shown indented under their parent page, with hover-to-branch, diff modal (added/modified/deleted), and merge with strategy selection
+- Session replay player modal: session picker, 1×/2×/4× speed, streamed playback onto a read-only canvas with live cursors
+- One-click PNG/PDF export and sign-out from the right-edge action rail
+- Math input tool (Σ in the toolbar): typed equations land as math elements and trigger the AI solver
+- Audit rows are clickable — the referenced element gets a dashed halo flash on the canvas
+- Replay timeline scrubbing: after playback, drag the slider to re-render the canvas at any event
+- Canvas analytics modal: stat tiles, sequential-indigo edit heatmap, per-user participation bars, AI usage by trigger
+- Freehand pen tool: PencilBrush paths are converted to polyline `stroke` elements that sync like any other element
+- Image upload: `POST /uploads` (5 MB PNG/JPEG/WebP/GIF limit, served from `/uploads/`) with an Image toolbar button that places the picture on the canvas
+- Undo/redo (Ctrl+Z / Ctrl+Shift+Z) for create, delete, and move/scale/rotate — undone changes sync to collaborators through the normal element ops
+- Zoom: toolbar buttons + Ctrl+scroll (25%–400%), with remote cursors projected correctly at any zoom level
+- Members show a green "online now" dot backed by live WebSocket connections (`GET /pages/{id}/presence` now returns user ids)
+- Replay playback is client-paced (server `speed=0` dump): true pause/resume plus scrubbing at any time
 
 ## Local Full-Stack Setup
 

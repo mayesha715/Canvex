@@ -1,76 +1,14 @@
-import { Canvas, Ellipse, FabricObject, Line, Polyline, Rect, Textbox } from 'fabric'
+import { Canvas } from 'fabric'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { getSharedPage } from '../lib/api'
+import { makeReadOnlyObject, type ReadOnlyCanvasObject } from '../lib/fabricElements'
 import type { Element } from '../types'
 
-type SharedCanvasObject = FabricObject & { elementId?: string }
+type SharedCanvasObject = ReadOnlyCanvasObject
 
 type SharedPageViewerProps = {
   token: string
-}
-
-const DEFAULT_RECT = { width: 140, height: 90 }
-const DEFAULT_ELLIPSE = { rx: 60, ry: 40 }
-
-const makeObject = (element: Element): SharedCanvasObject | null => {
-  const base = {
-    left: element.transform.x,
-    top: element.transform.y,
-    scaleX: element.transform.scaleX,
-    scaleY: element.transform.scaleY,
-    angle: element.transform.rotation,
-    stroke: element.style.stroke ?? '#111827',
-    strokeWidth: element.style.strokeWidth ?? 2,
-    fill: element.style.fill ?? 'transparent',
-    selectable: false,
-    evented: false,
-  }
-
-  switch (element.type) {
-    case 'rect': {
-      const width = Number(element.content.width ?? DEFAULT_RECT.width)
-      const height = Number(element.content.height ?? DEFAULT_RECT.height)
-      return new Rect({ ...base, width, height }) as SharedCanvasObject
-    }
-    case 'ellipse': {
-      const rx = Number(element.content.rx ?? DEFAULT_ELLIPSE.rx)
-      const ry = Number(element.content.ry ?? DEFAULT_ELLIPSE.ry)
-      return new Ellipse({ ...base, rx, ry }) as SharedCanvasObject
-    }
-    case 'text':
-    case 'math':
-    case 'sticky': {
-      const text = String(element.content.text ?? '')
-      const backgroundColor = String(
-        element.content.backgroundColor ?? (element.type === 'sticky' ? '#fef3c7' : ''),
-      )
-      return new Textbox(text, {
-        ...base,
-        width: Number(element.content.width ?? 240),
-        fontSize: Number(element.content.fontSize ?? 20),
-        fill: element.style.fill ?? '#0f172a',
-        backgroundColor,
-        padding: element.type === 'sticky' ? 12 : 0,
-      }) as SharedCanvasObject
-    }
-    case 'stroke': {
-      const rawPoints = (element.content.points as Array<{ x: number; y: number } | number[]>) ?? []
-      const points = rawPoints.map((point) =>
-        Array.isArray(point) ? { x: point[0] ?? 0, y: point[1] ?? 0 } : point,
-      )
-      return new Polyline(points, { ...base, fill: 'transparent' }) as SharedCanvasObject
-    }
-    case 'arrow': {
-      const points = (element.content.points as number[]) ?? [0, 0, 120, 0]
-      return new Line(
-        [points[0] ?? 0, points[1] ?? 0, points[2] ?? 120, points[3] ?? 0],
-        { ...base, fill: 'transparent' },
-      ) as SharedCanvasObject
-    }
-    default:
-      return null
-  }
 }
 
 const SharedPageViewer = ({ token }: SharedPageViewerProps) => {
@@ -91,7 +29,7 @@ const SharedPageViewer = ({ token }: SharedPageViewerProps) => {
       canvas.remove(existing)
       objectsById.current.delete(element.id)
     }
-    const obj = makeObject(element)
+    const obj = makeReadOnlyObject(element)
     if (!obj) return
     obj.elementId = element.id
     canvas.add(obj)
