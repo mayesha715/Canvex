@@ -34,8 +34,8 @@ The app is written to be deploy-portable:
 
 - The repo pushed to GitHub (already done: `mayesha715/Canvex`).
 - Accounts on [Render](https://render.com) and [Vercel](https://vercel.com)
-  (both have free tiers; Render's managed Postgres needs the **Standard** plan
-  for `pgvector`).
+  (both have free tiers; Render's managed Postgres supports `pgvector` on all
+  plans, including free — note the free DB is deleted after ~30 days).
 - A [Google Gemini API key](https://aistudio.google.com/apikey) (optional — the
   AI pipeline uses a deterministic local fallback when it's blank).
 
@@ -61,9 +61,13 @@ The `render.yaml` Blueprint provisions all four backend pieces at once.
    on the web service). The workers have it set to `false` so only one process
    migrates. Watch the web service logs for `database migrations up to date`.
 
-> **pgvector:** if the migration fails with `extension "vector" is not
-> available`, the Postgres plan is too low — upgrade to Standard, or run
-> `CREATE EXTENSION vector;` from the Render Postgres shell once, then redeploy.
+> **pgvector:** the migration enables the `vector` extension automatically. If
+> it ever fails with `extension "vector" is not available`, run
+> `CREATE EXTENSION vector;` once from the Render Postgres shell, then redeploy.
+> **Plan note:** Render retired the old `standard`/`starter` plan names — valid
+> ones are `free`, `basic_256mb`, `basic_1gb`, … The Blueprint uses `free`; the
+> free DB is deleted ~30 days after creation, so bump the plan if you need it
+> to persist beyond that.
 
 ### Railway alternative
 

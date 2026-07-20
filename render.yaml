@@ -1,11 +1,15 @@
 # Render Blueprint for Canvex (backend + workers + Postgres + Redis).
 # In Render: New → Blueprint → connect this repo. Then set the `sync: false`
 # secrets (GEMINI_API_KEY, API_BASE_URL, CORS_ALLOW_ORIGINS) in the dashboard.
-# pgvector requires the Standard plan or higher for managed Postgres.
+# pgvector is available on all current Render Postgres plans, including free.
+#
+# NOTE: the free database is deleted ~30 days after creation — fine for a demo
+# or viva. For a persistent instance, bump `plan` to `basic_256mb` (or higher);
+# valid names: free, basic_256mb, basic_1gb, basic_4gb, pro_4gb, …
 
 databases:
   - name: canvex-postgres
-    plan: standard
+    plan: free
     postgresMajorVersion: "16"
 
 services:
