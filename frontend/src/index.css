@@ -494,6 +494,26 @@
     animation: panel-slide-in 0.22s ease-out;
   }
 
+  .workspace-tool-popover {
+    /* Transient: it opens on tool select and auto-closes when the cursor
+       leaves it (onMouseLeave) or you start using the canvas, so it never
+       lingers over the drawing area. */
+    @apply absolute left-1/2 top-[7.5rem] z-[60] w-72 -translate-x-1/2 rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-lg backdrop-blur-md;
+    animation: modal-pop-in 0.15s ease-out;
+  }
+
+  .workspace-popover-label {
+    @apply text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400;
+  }
+
+  .workspace-eraser-mode {
+    @apply flex flex-col items-center gap-0.5 rounded-xl border border-slate-200 bg-white/60 px-3 py-2 text-slate-600 hover:border-indigo-300;
+  }
+
+  .workspace-eraser-mode.active {
+    @apply border-indigo-400 bg-indigo-50/70 text-indigo-700 ring-1 ring-indigo-200;
+  }
+
   .workspace-modal-backdrop {
     @apply fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/30 p-6 backdrop-blur-sm;
   }

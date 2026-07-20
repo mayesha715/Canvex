@@ -1,4 +1,4 @@
-import { Canvas, Ellipse, FabricImage, FabricObject, Line, Path, PencilBrush, Point, Polyline, Rect, Textbox } from 'fabric'
+import { Canvas, Circle as FabricCircle, Ellipse, FabricImage, FabricObject, Line, Path, PencilBrush, Point, Polyline, Rect, Textbox, util } from 'fabric'
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
@@ -39,7 +39,33 @@ import {
 import { loadSession } from '../lib/storage'
 import type { AITriggerType, Element, ElementType, PageSummary, User } from '../types'
 
-type Tool = 'select' | 'pen' | 'rect' | 'ellipse' | 'arrow' | 'text' | 'sticky'
+type Tool = 'select' | 'pen' | 'pencil' | 'highlighter' | 'eraser' | 'rect' | 'ellipse' | 'arrow' | 'text' | 'sticky'
+
+const DRAW_TOOLS: readonly Tool[] = ['pen', 'pencil', 'highlighter']
+const HIGHLIGHTER_ALPHA = 0.35
+
+type EraserMode = 'whole' | 'partial'
+
+// Highlighter has its own colour set and thickness, independent of the pen.
+const HIGHLIGHTER_COLORS = ['#fde047', '#fca5a5', '#86efac', '#93c5fd', '#f0abfc', '#fdba74']
+const DEFAULT_HIGHLIGHTER_COLOR = '#fde047'
+const DEFAULT_HIGHLIGHTER_WIDTH = 18
+const HIGHLIGHTER_WIDTH_RANGE = { min: 8, max: 40 }
+const DEFAULT_ERASER_SIZE = 24
+const ERASER_SIZE_RANGE = { min: 8, max: 80 }
+
+// Bake alpha into the brush colour so the highlighter's translucency survives
+// the round-trip through the element's `style.stroke` string (no schema change).
+const toRgba = (hex: string, alpha: number): string => {
+  const value = hex.replace('#', '')
+  const full = value.length === 3 ? value.split('').map((c) => c + c).join('') : value
+  const int = Number.parseInt(full, 16)
+  if (Number.isNaN(int) || full.length !== 6) return hex
+  const r = (int >> 16) & 255
+  const g = (int >> 8) & 255
+  const b = int & 255
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
 
 type CanvasObject = FabricObject & {
   elementId?: string
@@ -93,6 +119,9 @@ type CanvasBoardProps = {
 const TOOL_LABELS: Record<Tool, string> = {
   select: 'Select',
   pen: 'Pen',
+  pencil: 'Pencil',
+  highlighter: 'Highlighter',
+  eraser: 'Eraser',
   rect: 'Rectangle',
   ellipse: 'Ellipse',
   arrow: 'Arrow',
@@ -135,6 +164,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
   const renderCachedElementsRef = useRef<() => number>(() => 0)
   const applyingRemote = useRef(false)
   const activeToolRef = useRef<Tool>('select')
+  const erasingRef = useRef(false)
   const pageRef = useRef<PageSummary | null>(null)
   const seqRef = useRef(0)
   const clientIdRef = useRef(getClientId())
@@ -152,6 +182,9 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
   const [isUploadingImage, setIsUploadingImage] = useState(false)
   const [wsRetryNonce, setWsRetryNonce] = useState(0)
   const [tool, setTool] = useState<Tool>('select')
+  // Eraser/highlighter options popover — opens when the tool is selected,
+  // auto-minimises when the cursor leaves it or you start using the canvas.
+  const [optionsOpen, setOptionsOpen] = useState(false)
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected'>(
     'disconnected',
   )
@@ -170,6 +203,21 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
   const strokeColorRef = useRef(strokeColor)
   const isOfflineRef = useRef(isOffline)
 
+  // Highlighter (independent of the pen colour) + eraser options.
+  const [highlighterColor, setHighlighterColor] = useState(DEFAULT_HIGHLIGHTER_COLOR)
+  const [highlighterWidth, setHighlighterWidth] = useState(DEFAULT_HIGHLIGHTER_WIDTH)
+  const [eraserMode, setEraserMode] = useState<EraserMode>('whole')
+  const [eraserSize, setEraserSize] = useState(DEFAULT_ERASER_SIZE)
+  const [autoSwitchBack, setAutoSwitchBack] = useState(true)
+  const highlighterColorRef = useRef(highlighterColor)
+  const highlighterWidthRef = useRef(highlighterWidth)
+  const eraserModeRef = useRef(eraserMode)
+  const eraserSizeRef = useRef(eraserSize)
+  const autoSwitchBackRef = useRef(autoSwitchBack)
+  const lastDrawToolRef = useRef<Tool>('pen')
+  const erasedSomethingRef = useRef(false)
+  const eraserCursorRef = useRef<FabricCircle | null>(null)
+
   const cursorColor = useMemo(() => colorFromId(user.id), [user.id])
 
   useEffect(() => {
@@ -179,6 +227,30 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
   useEffect(() => {
     strokeColorRef.current = strokeColor
   }, [strokeColor])
+
+  useEffect(() => {
+    highlighterColorRef.current = highlighterColor
+    highlighterWidthRef.current = highlighterWidth
+    autoSwitchBackRef.current = autoSwitchBack
+    eraserModeRef.current = eraserMode
+    // Keep the live highlighter brush in sync when its colour/width changes.
+    const canvas = fabricRef.current
+    if (canvas?.freeDrawingBrush && activeToolRef.current === 'highlighter') {
+      canvas.freeDrawingBrush.color = toRgba(highlighterColor, HIGHLIGHTER_ALPHA)
+      canvas.freeDrawingBrush.width = highlighterWidth
+    }
+  }, [highlighterColor, highlighterWidth, autoSwitchBack, eraserMode])
+
+  useEffect(() => {
+    eraserSizeRef.current = eraserSize
+    // Resize the live eraser cursor preview to match.
+    const cursor = eraserCursorRef.current
+    if (cursor) {
+      cursor.set({ radius: eraserSize / 2 })
+      cursor.setCoords()
+      fabricRef.current?.requestRenderAll()
+    }
+  }, [eraserSize])
 
   useEffect(() => {
     isOfflineRef.current = isOffline
@@ -1159,7 +1231,9 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       setStrokeColor(color)
       const canvas = fabricRef.current
       if (!canvas) return
-      if (canvas.freeDrawingBrush) {
+      // The main swatches drive pen/pencil; the highlighter keeps its own
+      // colour set, so leave its brush untouched here.
+      if (canvas.freeDrawingBrush && activeToolRef.current !== 'highlighter') {
         canvas.freeDrawingBrush.color = color
       }
       const activeObjects = canvas.getActiveObjects() as CanvasObject[]
@@ -1197,16 +1271,67 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     activeToolRef.current = tool
     const canvas = fabricRef.current
     if (!canvas) return
-    canvas.isDrawingMode = tool === 'pen'
-    if (tool === 'pen') {
+    const isDraw = DRAW_TOOLS.includes(tool)
+    canvas.isDrawingMode = isDraw
+    if (isDraw) {
+      lastDrawToolRef.current = tool
+    }
+    // Rubber-band selection only in the Select tool; every other tool either
+    // draws, places, or erases and must not start a selection box.
+    canvas.selection = tool === 'select'
+    if (isDraw) {
       const brush =
         canvas.freeDrawingBrush instanceof PencilBrush
           ? canvas.freeDrawingBrush
           : new PencilBrush(canvas)
-      brush.color = strokeColorRef.current
-      brush.width = 3
+      if (tool === 'pencil') {
+        brush.width = 1.5
+        brush.color = strokeColorRef.current
+      } else if (tool === 'highlighter') {
+        brush.width = highlighterWidthRef.current
+        brush.color = toRgba(highlighterColorRef.current, HIGHLIGHTER_ALPHA)
+      } else {
+        brush.width = 3
+        brush.color = strokeColorRef.current
+      }
       canvas.freeDrawingBrush = brush
     }
+    // Remove any stale eraser cursor from the previous tool.
+    if (eraserCursorRef.current) {
+      applyingRemote.current = true
+      canvas.remove(eraserCursorRef.current)
+      applyingRemote.current = false
+      eraserCursorRef.current = null
+    }
+    if (tool === 'eraser') {
+      // Hide the native cursor and show a dashed circle sized to the eraser.
+      canvas.defaultCursor = 'none'
+      canvas.hoverCursor = 'none'
+      const cursor = new FabricCircle({
+        radius: eraserSizeRef.current / 2,
+        left: -100,
+        top: -100,
+        originX: 'center',
+        originY: 'center',
+        fill: 'rgba(148, 163, 184, 0.18)',
+        stroke: '#64748b',
+        strokeWidth: 1,
+        strokeDashArray: [4, 3],
+        selectable: false,
+        evented: false,
+      }) as unknown as FabricCircle & { isRemote?: boolean }
+      cursor.isRemote = true
+      applyingRemote.current = true
+      canvas.add(cursor)
+      applyingRemote.current = false
+      eraserCursorRef.current = cursor
+      canvas.discardActiveObject()
+      canvas.requestRenderAll()
+    } else {
+      canvas.defaultCursor = 'default'
+      canvas.hoverCursor = 'move'
+    }
+    erasingRef.current = false
   }, [tool])
 
   useEffect(() => {
@@ -1319,7 +1444,94 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       canvas.requestRenderAll()
     })
 
+    // Scene-space (zoom/pan-independent) bounding box of an object.
+    const sceneBounds = (obj: CanvasObject) => {
+      obj.setCoords()
+      const corners = obj.aCoords ? Object.values(obj.aCoords) : []
+      const xs = corners.map((c) => c.x)
+      const ys = corners.map((c) => c.y)
+      return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }
+    }
+
+    // Scene-space coordinates of a polyline's vertices (accounts for the
+    // pathOffset centering and the object's transform, so it stays correct at
+    // any zoom or after the stroke has been moved).
+    const sceneVertices = (poly: Polyline): Point[] => {
+      const matrix = poly.calcTransformMatrix()
+      const offset = poly.pathOffset ?? { x: 0, y: 0 }
+      return (poly.points ?? []).map((p) =>
+        util.transformPoint(new Point(p.x - offset.x, p.y - offset.y), matrix),
+      )
+    }
+
+    const circleHitsBounds = (cx: number, cy: number, r: number, b: ReturnType<typeof sceneBounds>) => {
+      const nx = Math.max(b.minX, Math.min(cx, b.maxX))
+      const ny = Math.max(b.minY, Math.min(cy, b.maxY))
+      return (cx - nx) ** 2 + (cy - ny) ** 2 <= r * r
+    }
+
+    // One erase "dab" at a scene point. Whole mode removes any element the
+    // eraser circle touches; Partial mode removes only the covered span of a
+    // stroke, splitting it into the surviving fragments. Both go through the
+    // normal add/remove events, so every change syncs and is undoable.
+    const eraseStep = (cx: number, cy: number) => {
+      const radius = eraserSizeRef.current / 2
+      const partial = eraserModeRef.current === 'partial'
+      // Snapshot the object list: we mutate it while iterating.
+      for (const object of [...canvas.getObjects()]) {
+        const obj = object as CanvasObject
+        if (obj.isRemote || obj.type === 'path') continue
+        if (!partial) {
+          if (circleHitsBounds(cx, cy, radius, sceneBounds(obj))) {
+            canvas.remove(obj)
+            erasedSomethingRef.current = true
+          }
+          continue
+        }
+        // Partial: only strokes can be partially erased.
+        if (obj.type !== 'polyline') continue
+        const verts = sceneVertices(obj as Polyline)
+        if (!circleHitsBounds(cx, cy, radius, sceneBounds(obj))) continue
+        const runs: Point[][] = []
+        let run: Point[] = []
+        for (const v of verts) {
+          const covered = (v.x - cx) ** 2 + (v.y - cy) ** 2 <= radius * radius
+          if (covered) {
+            if (run.length) runs.push(run)
+            run = []
+          } else {
+            run.push(v)
+          }
+        }
+        if (run.length) runs.push(run)
+        // Nothing actually covered → leave the stroke alone.
+        if (runs.length === 1 && runs[0].length === verts.length) continue
+        canvas.remove(obj)
+        erasedSomethingRef.current = true
+        for (const fragment of runs) {
+          if (fragment.length < 2) continue
+          const frag = new Polyline(fragment, {
+            stroke: obj.stroke,
+            strokeWidth: obj.strokeWidth,
+            fill: 'transparent',
+          }) as CanvasObject
+          frag.canvexType = 'stroke'
+          canvas.add(frag)
+        }
+      }
+      canvas.requestRenderAll()
+    }
+
     canvas.on('mouse:down', (event) => {
+      // Any canvas interaction minimises the tool-options popover.
+      setOptionsOpen(false)
+      if (activeToolRef.current === 'eraser') {
+        erasingRef.current = true
+        erasedSomethingRef.current = false
+        const p = canvas.getScenePoint(event.e)
+        eraseStep(p.x, p.y)
+        return
+      }
       const pointer = canvas.getScenePoint(event.e)
       if (activeToolRef.current === 'rect') {
         const rect = new Rect({
@@ -1382,7 +1594,34 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       }
     })
 
+    canvas.on('mouse:up', () => {
+      if (activeToolRef.current === 'eraser') {
+        erasingRef.current = false
+        // "Auto switch back to last tool": after an erase gesture that
+        // removed something, return to the last drawing tool.
+        if (autoSwitchBackRef.current && erasedSomethingRef.current) {
+          setTool(lastDrawToolRef.current)
+        }
+        erasedSomethingRef.current = false
+      }
+    })
+
     canvas.on('mouse:move', (event) => {
+      if (activeToolRef.current === 'eraser') {
+        const p = canvas.getScenePoint(event.e)
+        // Follow the pointer with the dashed eraser circle every move.
+        const cursor = eraserCursorRef.current
+        // Guard against a cursor left over from a previous page's canvas.
+        if (cursor && cursor.canvas === canvas) {
+          cursor.set({ left: p.x, top: p.y })
+          cursor.setCoords()
+          canvas.bringObjectToFront(cursor)
+          canvas.requestRenderAll()
+        }
+        if (erasingRef.current) {
+          eraseStep(p.x, p.y)
+        }
+      }
       if (!pageRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
       if (cursorThrottleRef.current) return
       cursorThrottleRef.current = window.setTimeout(() => {
@@ -1393,6 +1632,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     })
 
     canvas.on('selection:created', (event) => {
+      if (activeToolRef.current === 'eraser') return
       const obj = event.selected?.[0] as CanvasObject | undefined
       if (obj?.elementId) {
         sendLock(obj.elementId)
@@ -1400,6 +1640,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     })
 
     canvas.on('selection:updated', (event) => {
+      if (activeToolRef.current === 'eraser') return
       const obj = event.selected?.[0] as CanvasObject | undefined
       if (obj?.elementId) {
         sendLock(obj.elementId)
@@ -1971,21 +2212,37 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
         </button>
         <button
           type="button"
-          className="workspace-tool-button ghost"
+          className={`workspace-tool-button ${tool === 'pencil' ? 'active' : ''}`}
           title="Pencil"
-          onClick={() => showToolMessage('Pencil mode is coming soon.')}
+          onClick={() => {
+            setTool('pencil')
+            showToolMessage('Pencil — fine freehand lines. Switch to Select when done.')
+          }}
         >
           <Brush size={16} />
         </button>
         <button
           type="button"
-          className="workspace-tool-button ghost"
+          className={`workspace-tool-button ${tool === 'highlighter' ? 'active' : ''}`}
           title="Highlighter"
-          onClick={() => showToolMessage('Highlighter mode is coming soon.')}
+          onClick={() => {
+            setTool('highlighter')
+            setOptionsOpen(true)
+            showToolMessage('Highlighter — pick a colour, then drag across the canvas.')
+          }}
         >
           <Highlighter size={16} />
         </button>
-        <button type="button" className="workspace-tool-button ghost" title="Eraser" onClick={deleteActiveObjects}>
+        <button
+          type="button"
+          className={`workspace-tool-button ${tool === 'eraser' ? 'active' : ''}`}
+          title="Eraser"
+          onClick={() => {
+            setTool('eraser')
+            setOptionsOpen(true)
+            showToolMessage('Eraser — click or drag over elements to remove them.')
+          }}
+        >
           <Eraser size={16} />
         </button>
         <div className="workspace-tool-divider" />
@@ -2118,6 +2375,82 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
           <ZoomIn size={16} />
         </button>
       </div>
+
+      {tool === 'highlighter' && optionsOpen && (
+        <div className="workspace-tool-popover" onMouseLeave={() => setOptionsOpen(false)}>
+          <p className="workspace-popover-label">Highlighter colour</p>
+          <div className="mt-2 flex items-center gap-2">
+            {HIGHLIGHTER_COLORS.map((color) => (
+              <button
+                key={color}
+                type="button"
+                title={color}
+                onClick={() => setHighlighterColor(color)}
+                className={`h-6 w-6 rounded-full ring-1 ring-slate-300 transition-transform ${
+                  highlighterColor === color ? 'scale-110 ring-2 ring-indigo-500 ring-offset-2' : ''
+                }`}
+                style={{ backgroundColor: color }}
+              />
+            ))}
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <span className="workspace-popover-label shrink-0">Thickness</span>
+            <input
+              type="range"
+              min={HIGHLIGHTER_WIDTH_RANGE.min}
+              max={HIGHLIGHTER_WIDTH_RANGE.max}
+              value={highlighterWidth}
+              onChange={(event) => setHighlighterWidth(Number(event.target.value))}
+              className="h-1.5 flex-1 cursor-pointer accent-indigo-600"
+            />
+            <span className="w-8 text-right font-mono text-[11px] text-slate-500">{highlighterWidth}px</span>
+          </div>
+        </div>
+      )}
+
+      {tool === 'eraser' && optionsOpen && (
+        <div className="workspace-tool-popover" onMouseLeave={() => setOptionsOpen(false)}>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setEraserMode('whole')}
+              className={`workspace-eraser-mode ${eraserMode === 'whole' ? 'active' : ''}`}
+            >
+              <span className="text-sm font-medium">Whole</span>
+              <span className="text-[10px] text-slate-400">removes an element</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setEraserMode('partial')}
+              className={`workspace-eraser-mode ${eraserMode === 'partial' ? 'active' : ''}`}
+            >
+              <span className="text-sm font-medium">Partial</span>
+              <span className="text-[10px] text-slate-400">rubs out pen strokes</span>
+            </button>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <span className="workspace-popover-label shrink-0">Size</span>
+            <input
+              type="range"
+              min={ERASER_SIZE_RANGE.min}
+              max={ERASER_SIZE_RANGE.max}
+              value={eraserSize}
+              onChange={(event) => setEraserSize(Number(event.target.value))}
+              className="h-1.5 flex-1 cursor-pointer accent-indigo-600"
+            />
+            <span className="w-8 text-right font-mono text-[11px] text-slate-500">{eraserSize}px</span>
+          </div>
+          <label className="mt-3 flex cursor-pointer items-center justify-between">
+            <span className="text-xs text-slate-600">Auto switch back to last tool</span>
+            <input
+              type="checkbox"
+              checked={autoSwitchBack}
+              onChange={(event) => setAutoSwitchBack(event.target.checked)}
+              className="h-4 w-4 cursor-pointer accent-indigo-600"
+            />
+          </label>
+        </div>
+      )}
 
       {isMathOpen && (
         <div className="workspace-modal-backdrop" onClick={() => setIsMathOpen(false)}>

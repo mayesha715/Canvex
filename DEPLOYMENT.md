@@ -1,0 +1,155 @@
+# Canvex — Deployment Guide (Phase 13)
+
+This guide takes Canvex from the local stack to a public deployment:
+**backend + workers + Postgres + Redis on Render** and **frontend on Vercel**,
+with **CI/CD via GitHub Actions**.
+
+The repository already contains everything the platforms need:
+
+| File | Purpose |
+|------|---------|
+| [`render.yaml`](render.yaml) | Render Blueprint — web service, AI worker, webhook worker, Postgres, Redis |
+| [`backend/Procfile`](backend/Procfile) | Process definitions for Railway (alternative to Render) |
+| [`backend/Dockerfile`](backend/Dockerfile) | Container build; honours `$PORT` |
+| [`frontend/vercel.json`](frontend/vercel.json) | Vite build + SPA rewrites (so `/view/:token` resolves) |
+| [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) | Tests on every push/PR; deploy on push to `main` |
+
+The app is written to be deploy-portable:
+
+- **Database URL normalisation** — the backend rewrites `postgres://` /
+  `postgresql://` (what Render/Railway hand out) to `postgresql+asyncpg://`
+  and strips `sslmode`, so their connection strings work unchanged
+  ([`backend/app/config.py`](backend/app/config.py)).
+- **`$PORT`** — the start command binds to the platform-injected port.
+- **`wss://`** — the frontend derives the WebSocket URL from `VITE_API_URL`
+  (http→ws, https→wss) automatically.
+- **Migrations on boot** — in production the app runs `alembic upgrade head`
+  during startup (plan 13.7), so each deploy ships schema changes.
+- **Fail-fast config** — the app refuses to start in production with the
+  default JWT secret or a wildcard CORS origin.
+
+---
+
+## Prerequisites
+
+- The repo pushed to GitHub (already done: `mayesha715/Canvex`).
+- Accounts on [Render](https://render.com) and [Vercel](https://vercel.com)
+  (both have free tiers; Render's managed Postgres needs the **Standard** plan
+  for `pgvector`).
+- A [Google Gemini API key](https://aistudio.google.com/apikey) (optional — the
+  AI pipeline uses a deterministic local fallback when it's blank).
+
+---
+
+## 13.1–13.3  Backend, Postgres & Redis on Render (Blueprint)
+
+The `render.yaml` Blueprint provisions all four backend pieces at once.
+
+1. In Render: **New → Blueprint**, connect the `Canvex` repo, and apply.
+   It creates: `canvex-postgres`, `canvex-redis`, `canvex-api` (web),
+   `canvex-ai-worker`, `canvex-webhook-worker`.
+2. Render auto-wires `DATABASE_URL`, `REDIS_URL`, and a generated
+   `JWT_SECRET_KEY`. You must set the `sync: false` secrets in the dashboard:
+   - `GEMINI_API_KEY` — your key (or leave blank for the local fallback).
+   - `CORS_ALLOW_ORIGINS` — your Vercel URL, e.g. `https://canvex.vercel.app`
+     (comma-separate multiple; **never** `*`).
+   - `API_BASE_URL` — the web service's public URL, e.g.
+     `https://canvex-api.onrender.com` (set it after the first deploy, when
+     Render has assigned the URL, then redeploy). This is used for upload and
+     invite links.
+3. First boot runs migrations automatically (`RUN_MIGRATIONS_ON_STARTUP=true`
+   on the web service). The workers have it set to `false` so only one process
+   migrates. Watch the web service logs for `database migrations up to date`.
+
+> **pgvector:** if the migration fails with `extension "vector" is not
+> available`, the Postgres plan is too low — upgrade to Standard, or run
+> `CREATE EXTENSION vector;` from the Render Postgres shell once, then redeploy.
+
+### Railway alternative
+
+Railway detects Python via Nixpacks and uses [`backend/Procfile`](backend/Procfile).
+Create one service per process (`web`, `ai_worker`, `webhook_worker`) from the
+same repo with root directory `backend/`, add Postgres and Redis plugins, and
+set the same environment variables. Use the **internal** connection URLs.
+
+---
+
+## 13.4  Frontend on Vercel
+
+1. In Vercel: **Add New → Project**, import the `Canvex` repo.
+2. Set **Root Directory** to `frontend/`. Vercel auto-detects Vite and reads
+   [`frontend/vercel.json`](frontend/vercel.json) for the build + SPA rewrites.
+3. Add one environment variable: `VITE_API_URL` = your Render backend URL
+   (e.g. `https://canvex-api.onrender.com`). The WebSocket URL (`wss://…`) is
+   derived from it automatically.
+4. Deploy. Vercel redeploys on every push to `main`.
+
+After the frontend URL exists, go back and set the backend's
+`CORS_ALLOW_ORIGINS` (and `API_BASE_URL`) to match, then redeploy the backend.
+
+---
+
+## 13.5  CORS
+
+`CORS_ALLOW_ORIGINS` is a comma-separated allowlist read from the environment.
+Locally it defaults to the Vite dev/preview ports. In production set it to
+exactly your Vercel domain(s). The startup guard **aborts** if it contains `*`
+while `ENVIRONMENT=production`.
+
+---
+
+## 13.6  CI/CD (GitHub Actions)
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs on every
+push and PR:
+
+- **backend** — spins up pgvector-Postgres + Redis, runs `alembic upgrade head`
+  (validating every migration), imports the app, boots it, and hits
+  `/health/ready`.
+- **frontend** — `npm ci` + `npm run build` (type-check + Vite build).
+- **deploy** — only on push to `main`, only if both passed: `POST`s to the
+  Render deploy hook. Vercel deploys itself via its Git integration.
+
+Set up the deploy hook:
+
+1. Render → `canvex-api` → **Settings → Deploy Hook**, copy the URL.
+2. GitHub → repo **Settings → Secrets and variables → Actions → New secret**:
+   `RENDER_DEPLOY_HOOK_URL` = that URL.
+
+If the secret is absent, the deploy step is skipped (CI still runs), so PRs from
+forks don't fail.
+
+---
+
+## 13.7  Migrations in production
+
+Handled in code: [`backend/app/main.py`](backend/app/main.py)'s `lifespan` calls
+`run_pending_migrations()` on boot when `settings.migrate_on_startup` is true
+(automatic in production). A failed migration aborts startup, so a bad deploy
+fails loudly instead of serving a broken schema. Never run
+`alembic upgrade head` by hand in production after the first deploy.
+
+---
+
+## 13.8  Monitoring & uptime
+
+- Render's dashboard has per-service logs (structured JSON — see Phase 12) and
+  metrics. Enable alerts on health-check failures.
+- Free option: [UptimeRobot](https://uptimerobot.com) → HTTP(s) monitor on
+  `https://<your-api>/health/live` every 5 min. This also keeps Render's free
+  tier from idling the service.
+
+---
+
+## 13.9  Final production checklist
+
+- [ ] All secrets set in the platform dashboards, **nothing** in a committed file.
+- [ ] `ENVIRONMENT=production` (disables SQL echo; the startup guard is armed).
+- [ ] Migrations applied — logs show `database migrations up to date`.
+- [ ] `CORS_ALLOW_ORIGINS` is the exact Vercel domain(s), not `*`.
+- [ ] Rate limiting active (Phase 12) — `/auth/register` 429s under a burst.
+- [ ] `GET /health/live` and `/health/ready` return 200.
+- [ ] WebSockets connect over `wss://` (Render/Vercel terminate TLS).
+- [ ] `API_BASE_URL` = the public backend URL (upload/invite links resolve).
+- [ ] End-to-end: register → create channel → draw → AI response → audit log →
+      export → branch → merge, on the public URLs.

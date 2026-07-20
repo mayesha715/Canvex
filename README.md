@@ -4,7 +4,7 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phase 12 (production hardening) is complete. Phase 13 (deployment) has not started.
+Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phase 12 (production hardening) is complete. Phase 13 (deployment) is deploy-ready: the code and config artifacts are in place (`render.yaml` Blueprint, `backend/Procfile`, `frontend/vercel.json`, `.github/workflows/deploy.yml` CI/CD, boot-time migrations, provider-URL normalisation) — see [DEPLOYMENT.md](DEPLOYMENT.md) for the step-by-step. The remaining work is provisioning on the hosting dashboards (Render + Vercel accounts, env vars), which only you can do.
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -61,7 +61,9 @@ Phases 0–10 are implemented: audit log querying, session replay, Git-style boa
 - Audit rows are clickable — the referenced element gets a dashed halo flash on the canvas
 - Replay timeline scrubbing: after playback, drag the slider to re-render the canvas at any event
 - Canvas analytics modal: stat tiles, sequential-indigo edit heatmap, per-user participation bars, AI usage by trigger
-- Freehand pen tool: PencilBrush paths are converted to polyline `stroke` elements that sync like any other element
+- Freehand drawing: pen (3px), pencil (fine 1.5px), and highlighter (thick translucent) — all PencilBrush strokes converted to polyline `stroke` elements that sync like any other element
+- Highlighter options popover: its own colour set (independent of the pen) and an 8–40px thickness slider
+- Manual eraser with an options popover (iOS Markup-style): **Whole** mode removes whole elements, **Partial** mode rubs out only the covered span of a pen stroke (splitting it into fragments); an 8–80px size slider drives a live dashed cursor circle, plus "auto switch back to last tool". All erasures sync and are undoable.
 - Image upload: `POST /uploads` (5 MB PNG/JPEG/WebP/GIF limit, served from `/uploads/`) with an Image toolbar button that places the picture on the canvas
 - Undo/redo (Ctrl+Z / Ctrl+Shift+Z) for create, delete, and move/scale/rotate — undone changes sync to collaborators through the normal element ops
 - Zoom: toolbar buttons + Ctrl+scroll (25%–400%), with remote cursors projected correctly at any zoom level

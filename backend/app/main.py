@@ -1,5 +1,7 @@
 import logging
+from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,6 +13,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.core.logging import setup_logging
+from app.core.migrations import run_pending_migrations
 from app.core.rate_limit import limiter
 from app.db.session import AsyncSessionLocal
 from app.middleware.observability import RequestContextMiddleware, SecurityHeadersMiddleware
@@ -47,7 +50,21 @@ def assert_production_config() -> None:
 
 assert_production_config()
 
-app = FastAPI(title="Canvex API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Plan 13.7: apply pending migrations on boot (production restarts on each
+    # deploy, so schema changes ship automatically). Run in a worker thread —
+    # alembic's env.py starts its own asyncio loop. Failures propagate and
+    # abort startup so a bad migration fails the deploy loudly.
+    if settings.migrate_on_startup:
+        logger.info("applying database migrations on startup")
+        await anyio.to_thread.run_sync(run_pending_migrations)
+        logger.info("database migrations up to date")
+    yield
+
+
+app = FastAPI(title="Canvex API", lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
