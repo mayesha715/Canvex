@@ -1220,7 +1220,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
           source: result.source,
           added: false,
         },
-        ...prev.slice(0, 5),
+        ...prev.slice(0, 19),
       ])
       setStatusMessage(
         result.source === 'gemini'
@@ -2036,8 +2036,9 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
                 triggerType: payload.trigger_type,
                 elementId: payload.element.id,
                 content: String(payload.element.content.text ?? 'AI response added to canvas.'),
+                added: true, // canvas-trigger answers are placed automatically
               },
-              ...prev.slice(0, 4),
+              ...prev.slice(0, 19),
             ])
             setIsAiOpen(true)
             setStatusMessage('Canvex AI added a response.')
@@ -2594,7 +2595,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       </div>
       {isAiOpen && (
         <aside className="workspace-ai-panel">
-          <div className="flex items-center justify-between">
+          <div className="flex shrink-0 items-center justify-between">
             <div>
               <h3 className="font-reading-serif text-lg text-indigo-700">Ask Canvex</h3>
               <p className="text-xs uppercase tracking-[0.18em] text-slate-400">AI notebook assistant</p>
@@ -2603,37 +2604,36 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
               Close
             </button>
           </div>
-          <div className="mt-5 space-y-4 text-sm leading-6 text-slate-600">
-            <div className="space-y-2">
-              <input
-                className="workspace-input"
-                placeholder="Ask anything, or write it on the canvas…"
-                value={aiPrompt}
-                disabled={aiPending}
-                onChange={(event) => setAiPrompt(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !aiPending) {
-                    askCanvex()
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="workspace-action-button w-full justify-center"
-                onClick={askCanvex}
-                disabled={aiPending || !aiPrompt.trim()}
-              >
-                {aiPending ? (
-                  <Sparkles size={15} className="animate-pulse" />
-                ) : (
-                  <SendHorizontal size={15} />
-                )}
-                {aiPending ? 'Thinking…' : 'Ask Canvex'}
-              </button>
-            </div>
+          <div className="mt-5 shrink-0 space-y-2">
+            <input
+              className="workspace-input"
+              placeholder="Ask anything, or write it on the canvas…"
+              value={aiPrompt}
+              disabled={aiPending}
+              onChange={(event) => setAiPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !aiPending) {
+                  askCanvex()
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="workspace-action-button w-full justify-center"
+              onClick={askCanvex}
+              disabled={aiPending || !aiPrompt.trim()}
+            >
+              {aiPending ? (
+                <Sparkles size={15} className="animate-pulse" />
+              ) : (
+                <SendHorizontal size={15} />
+              )}
+              {aiPending ? 'Thinking…' : 'Ask Canvex'}
+            </button>
+          </div>
 
-            <div className="space-y-3">
-              {aiMessages.length === 0 ? (
+          <div className="-mr-1 mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 text-sm leading-6 text-slate-600">
+            {aiMessages.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/30 p-5 text-center">
                   <Sparkles size={20} className="text-indigo-400" />
                   <p className="font-handwriting text-lg leading-6 text-slate-500">
@@ -2696,7 +2696,6 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
                 ))
               )}
             </div>
-          </div>
         </aside>
       )}
     </div>

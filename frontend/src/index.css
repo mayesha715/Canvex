@@ -470,7 +470,7 @@
   }
 
   .workspace-ai-panel {
-    @apply absolute bottom-6 right-6 z-[80] w-80 rounded-2xl border border-dashed border-indigo-300 bg-white/90 p-4 shadow-lg backdrop-blur-md;
+    @apply absolute bottom-6 right-6 z-[80] flex max-h-[calc(100vh-8rem)] w-80 flex-col overflow-hidden rounded-2xl border border-dashed border-indigo-300 bg-white/90 p-4 shadow-lg backdrop-blur-md;
   }
 
   .workspace-action-rail {
