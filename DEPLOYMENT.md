@@ -102,6 +102,39 @@ while `ENVIRONMENT=production`.
 
 ---
 
+## 13.5b  Social & institutional sign-in
+
+Both live under the "or" divider on the login screen. The frontend reads
+`GET /auth/config` on load to decide what to show, so **all configuration is on
+the backend** — nothing to set in Vercel.
+
+**Institutional Login** works out of the box (no setup): it registers/authenticates
+with the existing password system but requires an institutional email. Restrict the
+allowed domains with `INSTITUTIONAL_EMAIL_DOMAINS` (comma-separated, e.g.
+`edu,edu.bd`); leave it blank to accept any `.edu` / `.ac.` address.
+
+**Sign in with Google** stays hidden until you set `GOOGLE_CLIENT_ID`:
+
+1. [Google Cloud Console](https://console.cloud.google.com) → create/select a
+   project → **APIs & Services → Credentials → Create credentials → OAuth client
+   ID → Web application**.
+2. Under **Authorized JavaScript origins** add your frontend origins, exactly
+   (scheme + host, no path/trailing slash):
+   - `http://localhost:5173` (local dev)
+   - `https://your-app.vercel.app` (production)
+   No redirect URIs are needed — Google Identity Services uses the origins.
+3. Copy the **Client ID** (looks like `…-….apps.googleusercontent.com`) and set
+   it as `GOOGLE_CLIENT_ID` on the Render **web service** (Environment tab). The
+   client ID is public and is served to the browser via `/auth/config`, so it
+   only lives on the backend. Save → wait for redeploy.
+
+The backend verifies each Google ID token against `GOOGLE_CLIENT_ID`, then finds
+or creates the user (linking by verified email). OAuth-only accounts have no
+password (`users.password_hash` is now nullable — see migration
+`202607220001`).
+
+---
+
 ## 13.6  CI/CD (GitHub Actions)
 
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs on every

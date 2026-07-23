@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "models/text-embedding-004"
     api_base_url: str = "http://localhost:8000"
     environment: str = "development"
+    # Google OAuth client ID (the "Web application" OAuth 2.0 client from Google
+    # Cloud Console). Blank → the "Sign in with Google" button stays hidden and
+    # POST /auth/google returns 503. The client ID is public, so the backend is
+    # the single source of truth and serves it to the frontend via /auth/config.
+    google_client_id: str = ""
+    # Allowlist for "Institutional Login". Comma-separated domain suffixes, e.g.
+    # "mit.edu,edu.bd" or just "edu". Empty → any academic-looking address
+    # (domain containing ".edu" or ".ac.") is accepted. See email_is_institutional.
+    institutional_email_domains: Annotated[list[str], NoDecode] = []
     # None → auto: run migrations on boot in production only (plan 13.7).
     # Override with RUN_MIGRATIONS_ON_STARTUP=true/false.
     run_migrations_on_startup: bool | None = None
@@ -64,16 +73,16 @@ class Settings(BaseSettings):
     def _fix_database_url(cls, value: object) -> object:
         return _normalize_database_url(value) if isinstance(value, str) else value
 
-    @field_validator("cors_allow_origins", mode="before")
+    @field_validator("cors_allow_origins", "institutional_email_domains", mode="before")
     @classmethod
-    def _split_cors(cls, value: object) -> object:
+    def _split_list(cls, value: object) -> object:
         # Accept a comma-separated string (friendlier for dashboard env vars)
         # or a JSON array; a Python list passes through unchanged.
         if isinstance(value, str):
             text = value.strip()
             if text.startswith("["):
                 return json.loads(text)
-            return [origin.strip() for origin in text.split(",") if origin.strip()]
+            return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
     @property
@@ -89,3 +98,19 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def email_is_institutional(email: str, allowed_domains: list[str] | None = None) -> bool:
+    """Whether an email belongs to an institution.
+
+    With an explicit allowlist, the domain must end with one of the entries
+    (so "edu.bd" matches "univ.edu.bd" and "mit.edu" matches exactly). With an
+    empty allowlist, fall back to a generic academic heuristic: the domain
+    contains ".edu" or ".ac." (covers .edu, .edu.bd, .ac.uk, .ac.bd, …)."""
+    domain = email.strip().lower().rsplit("@", maxsplit=1)[-1]
+    if not domain or "." not in domain:
+        return False
+    domains = allowed_domains if allowed_domains is not None else settings.institutional_email_domains
+    if domains:
+        return any(domain == d.lower() or domain.endswith("." + d.lower().lstrip(".")) for d in domains)
+    return ".edu" in domain or ".ac." in domain

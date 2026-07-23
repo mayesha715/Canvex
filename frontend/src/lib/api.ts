@@ -4,6 +4,7 @@ import { clearSession, loadSession, saveSession } from './storage'
 import type {
   AIInteraction,
   AuditPageResult,
+  AuthConfig,
   AuthSession,
   BranchDiff,
   ChannelDetail,
@@ -103,6 +104,47 @@ export const register = async (
   password: string,
 ): Promise<AuthSession> => {
   const { data } = await apiClient.post('/auth/register', {
+    email,
+    display_name: displayName,
+    password,
+  })
+  const session = { accessToken: data.access_token, refreshToken: data.refresh_token, user: data.user }
+  saveSession(session)
+  return session
+}
+
+// Public sign-in configuration — which social buttons to render and how to
+// validate them. Never throws for the caller: on failure it returns a
+// "disabled" config so the standard email/password form still works.
+export const getAuthConfig = async (): Promise<AuthConfig> => {
+  try {
+    const { data } = await axios.get(`${API_BASE_URL}/auth/config`)
+    return {
+      google_enabled: Boolean(data.google_enabled),
+      google_client_id: data.google_client_id ?? '',
+      institutional_domains: data.institutional_domains ?? [],
+    }
+  } catch {
+    return { google_enabled: false, google_client_id: '', institutional_domains: [] }
+  }
+}
+
+// Exchange a Google ID token (credential from Google Identity Services) for a
+// Canvex session.
+export const googleLogin = async (credential: string): Promise<AuthSession> => {
+  const { data } = await apiClient.post('/auth/google', { credential })
+  const session = { accessToken: data.access_token, refreshToken: data.refresh_token, user: data.user }
+  saveSession(session)
+  return session
+}
+
+// Register with an institutional email (server validates the domain).
+export const institutionalRegister = async (
+  email: string,
+  displayName: string,
+  password: string,
+): Promise<AuthSession> => {
+  const { data } = await apiClient.post('/auth/institutional/register', {
     email,
     display_name: displayName,
     password,

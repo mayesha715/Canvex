@@ -50,6 +50,10 @@ services:
         sync: false # set to this service's public URL after first deploy
       - key: CORS_ALLOW_ORIGINS
         sync: false # set to your Vercel domain(s), comma-separated
+      - key: GOOGLE_CLIENT_ID
+        sync: false # Google OAuth web client ID (blank → Google button hidden)
+      - key: INSTITUTIONAL_EMAIL_DOMAINS
+        sync: false # e.g. "edu,edu.bd" (blank → any .edu/.ac. accepted)
 
   # ── ARQ AI worker ─────────────────────────────────────────────
   - type: worker

@@ -85,6 +85,12 @@ export type AuthSession = {
   user: User
 }
 
+export type AuthConfig = {
+  google_enabled: boolean
+  google_client_id: string
+  institutional_domains: string[]
+}
+
 export type EventOperation = 'create' | 'update' | 'delete' | 'lock' | 'unlock' | 'restore'
 
 export type ElementEvent = {

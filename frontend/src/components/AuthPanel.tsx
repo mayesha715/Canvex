@@ -1,15 +1,86 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { AxiosError } from 'axios'
 import { ArrowRight, Eye, EyeOff, GraduationCap, LoaderCircle, Lock, Mail } from 'lucide-react'
 
 import backgroundUrl from '../assets/canvex-paper-bg.png'
-import { login, register } from '../lib/api'
-import type { AuthSession } from '../types'
+import { getAuthConfig, googleLogin, institutionalRegister, login, register } from '../lib/api'
+import type { AuthConfig, AuthSession } from '../types'
 
 type AuthPanelProps = {
   onAuthenticated: (session: AuthSession) => void
 }
 
+// ── Google Identity Services (loaded on demand only when configured) ────────
+type GoogleCredentialResponse = { credential?: string }
+type GoogleIdConfig = { client_id: string; callback: (response: GoogleCredentialResponse) => void }
+type GoogleButtonOptions = {
+  theme?: string
+  size?: string
+  width?: number
+  text?: string
+  shape?: string
+  logo_alignment?: string
+}
+type GoogleAccountsId = {
+  initialize: (config: GoogleIdConfig) => void
+  renderButton: (parent: HTMLElement, options: GoogleButtonOptions) => void
+}
+
+declare global {
+  interface Window {
+    google?: { accounts: { id: GoogleAccountsId } }
+  }
+}
+
+const GOOGLE_SCRIPT_SRC = 'https://accounts.google.com/gsi/client'
+let googleScriptPromise: Promise<void> | null = null
+
+const loadGoogleScript = (): Promise<void> => {
+  if (window.google?.accounts?.id) return Promise.resolve()
+  if (googleScriptPromise) return googleScriptPromise
+  googleScriptPromise = new Promise<void>((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = GOOGLE_SCRIPT_SRC
+    script.async = true
+    script.defer = true
+    script.onload = () => resolve()
+    script.onerror = () => {
+      googleScriptPromise = null
+      reject(new Error('Failed to load Google Identity Services'))
+    }
+    document.head.appendChild(script)
+  })
+  return googleScriptPromise
+}
+
+const describeAuthError = (err: unknown, fallback: string): string => {
+  const axiosError = err instanceof AxiosError ? err : null
+  const detail = axiosError?.response?.data?.detail
+  if (axiosError && !axiosError.response) {
+    // Request left the browser but no response came back → the API is
+    // unreachable (wrong VITE_API_URL, backend asleep, or CORS blocked).
+    return "Couldn't reach the server. It may be waking up — wait a few seconds and try again."
+  }
+  if (typeof detail === 'string') return detail // e.g. "Email is already registered"
+  return fallback
+}
+
+const emailIsInstitutional = (email: string, domains: string[]): boolean => {
+  const domain = (email.split('@')[1] ?? '').trim().toLowerCase()
+  if (!domain || !domain.includes('.')) return false
+  if (domains.length) {
+    return domains.some((raw) => {
+      const d = raw.trim().toLowerCase().replace(/^\./, '')
+      return domain === d || domain.endsWith('.' + d)
+    })
+  }
+  // No explicit allowlist → accept generic academic domains (.edu, .edu.bd,
+  // .ac.uk, .ac.bd, …) — matches the backend's default heuristic.
+  return domain.includes('.edu') || domain.includes('.ac.')
+}
+
 const defaultState = { email: '', displayName: '', password: '' }
+const disabledConfig: AuthConfig = { google_enabled: false, google_client_id: '', institutional_domains: [] }
 
 const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -18,28 +89,107 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [institutional, setInstitutional] = useState(false)
+  const [authConfig, setAuthConfig] = useState<AuthConfig>(disabledConfig)
+  const googleButtonRef = useRef<HTMLDivElement | null>(null)
+
+  const domainsLabel = authConfig.institutional_domains.length
+    ? authConfig.institutional_domains.join(', ')
+    : 'institutional (.edu)'
+  const institutionalHint = authConfig.institutional_domains.length
+    ? `Use your institutional email (${authConfig.institutional_domains.join(', ')}).`
+    : 'Use your institutional email address, e.g. name@university.edu.'
 
   const showComingSoon = (feature: string) => {
     setError('')
     setNotice(`${feature} is coming soon.`)
   }
 
+  useEffect(() => {
+    let active = true
+    getAuthConfig().then((config) => {
+      if (active) setAuthConfig(config)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const handleGoogleCredential = useCallback(
+    async (response: GoogleCredentialResponse) => {
+      if (!response.credential) return
+      setError('')
+      setNotice('')
+      setIsSubmitting(true)
+      try {
+        onAuthenticated(await googleLogin(response.credential))
+      } catch (err) {
+        setError(describeAuthError(err, 'Google sign-in failed. Please try again.'))
+      } finally {
+        setIsSubmitting(false)
+      }
+    },
+    [onAuthenticated],
+  )
+
+  // Render Google's official button once we know a client ID is configured.
+  useEffect(() => {
+    if (!authConfig.google_enabled || !authConfig.google_client_id) return
+    let cancelled = false
+    loadGoogleScript()
+      .then(() => {
+        if (cancelled || !window.google || !googleButtonRef.current) return
+        window.google.accounts.id.initialize({
+          client_id: authConfig.google_client_id,
+          callback: handleGoogleCredential,
+        })
+        googleButtonRef.current.innerHTML = ''
+        window.google.accounts.id.renderButton(googleButtonRef.current, {
+          theme: 'outline',
+          size: 'large',
+          width: 320,
+          text: 'continue_with',
+          shape: 'pill',
+          logo_alignment: 'center',
+        })
+      })
+      .catch(() => {
+        // Script blocked/offline — the standard email form still works.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [authConfig, handleGoogleCredential])
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     setError('')
     setNotice('')
+
+    if (institutional && !emailIsInstitutional(form.email, authConfig.institutional_domains)) {
+      setError(institutionalHint)
+      return
+    }
+
     setIsSubmitting(true)
     try {
-      const session =
-        mode === 'login'
-          ? await login(form.email, form.password)
-          : await register(form.email, form.displayName, form.password)
+      let session: AuthSession
+      if (mode === 'login') {
+        session = await login(form.email, form.password)
+      } else if (institutional) {
+        session = await institutionalRegister(form.email, form.displayName, form.password)
+      } else {
+        session = await register(form.email, form.displayName, form.password)
+      }
       onAuthenticated(session)
-    } catch {
+    } catch (err) {
       setError(
-        mode === 'register'
-          ? 'Check your details. Password must be at least 8 characters.'
-          : 'Authentication failed. Please check your details and try again.',
+        describeAuthError(
+          err,
+          mode === 'register'
+            ? 'Registration failed. Please check your details and try again.'
+            : 'Authentication failed. Please check your details and try again.',
+        ),
       )
     } finally {
       setIsSubmitting(false)
@@ -87,6 +237,25 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
           </div>
         </div>
 
+        {institutional && (
+          <div className="mt-5 flex w-full items-center justify-between gap-3 rounded-lg border border-indigo-200 bg-indigo-50/70 px-4 py-2 text-sm text-indigo-800 backdrop-blur-sm">
+            <span className="flex items-center gap-2 font-semibold">
+              <GraduationCap size={16} />
+              Institutional access — {domainsLabel} email
+            </span>
+            <button
+              type="button"
+              className="shrink-0 font-handwriting text-base text-indigo-700 underline decoration-indigo-400/50"
+              onClick={() => {
+                setInstitutional(false)
+                setError('')
+              }}
+            >
+              standard sign-in
+            </button>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="mt-6 w-full space-y-5">
           <div className="ink-field">
             <label className="auth-label" htmlFor="email">
@@ -101,7 +270,7 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
                 required
                 value={form.email}
                 onChange={(event) => setForm((prev) => ({ ...prev, email: event.target.value }))}
-                placeholder="researcher@institution.edu"
+                placeholder={institutional ? 'researcher@university.edu' : 'researcher@institution.edu'}
               />
             </div>
           </div>
@@ -180,13 +349,25 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
         </div>
 
         <div className="w-full space-y-3">
-          <button type="button" className="auth-secondary-action" onClick={() => showComingSoon('Google login')}>
-            <span className="text-xl font-bold text-blue-600">G</span>
-            Continue with Google
-          </button>
-          <button type="button" className="auth-secondary-action" onClick={() => showComingSoon('Institutional SSO')}>
+          {authConfig.google_enabled ? (
+            <div ref={googleButtonRef} className="flex min-h-[44px] justify-center" />
+          ) : (
+            <button type="button" className="auth-secondary-action" onClick={() => showComingSoon('Google login')}>
+              <span className="text-xl font-bold text-blue-600">G</span>
+              Continue with Google
+            </button>
+          )}
+          <button
+            type="button"
+            className="auth-secondary-action"
+            onClick={() => {
+              setInstitutional(true)
+              setError('')
+              setNotice('')
+            }}
+          >
             <GraduationCap size={18} />
-            Institutional Login (SSO)
+            Institutional Login
           </button>
         </div>
       </main>

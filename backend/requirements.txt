@@ -10,6 +10,7 @@ bcrypt==4.0.1
 redis
 arq
 google-generativeai
+google-auth
 pgvector
 pillow
 httpx
