@@ -25,7 +25,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { createShareLink, getPresenceCount, listElements, listPageAiLog, submitAIFeedback, uploadImage } from '../lib/api'
+import { askCanvex as askCanvexApi, createShareLink, getPresenceCount, listElements, listPageAiLog, submitAIFeedback, uploadImage } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import {
   getClientId,
@@ -196,6 +196,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
   const [isMathOpen, setIsMathOpen] = useState(false)
   const [mathInput, setMathInput] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
+  const [aiPending, setAiPending] = useState(false)
   const [aiMessages, setAiMessages] = useState<AIMessage[]>([])
   const [isLoadingPage, setIsLoadingPage] = useState(false)
   const [isOffline, setIsOffline] = useState(!navigator.onLine)
@@ -1175,7 +1176,7 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     }
   }, [page, showToolMessage])
 
-  const askCanvex = useCallback(() => {
+  const askCanvex = useCallback(async () => {
     const canvas = fabricRef.current
     const prompt = aiPrompt.trim()
     if (!page?.id || !canvas) {
@@ -1186,23 +1187,54 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       showToolMessage('Write a question for Canvex first.')
       return
     }
-    const obj = new Textbox(`/ai ${prompt}`, {
-      left: 180,
-      top: 140,
-      width: 360,
-      fontSize: 24,
-      fontFamily: 'Caveat, cursive',
-      fill: '#4f46e5',
-      stroke: '#4f46e5',
-      strokeWidth: 0,
-    }) as CanvasObject
-    obj.canvexType = 'text'
-    canvas.add(obj)
-    canvas.setActiveObject(obj)
-    canvas.requestRenderAll()
+
+    // Drop the answer near the middle of what the user is currently looking at.
+    let position: { x: number; y: number } | undefined
+    try {
+      const zoom = canvas.getZoom() || 1
+      const vpt = canvas.viewportTransform
+      if (vpt) {
+        position = {
+          x: (canvas.getWidth() / 2 - vpt[4]) / zoom - 180,
+          y: (canvas.getHeight() / 2 - vpt[5]) / zoom - 40,
+        }
+      }
+    } catch {
+      position = undefined // backend picks a default spot
+    }
+
     setAiPrompt('')
-    setStatusMessage('Canvex AI is reading the canvas...')
-  }, [aiPrompt, page?.id, showToolMessage])
+    setAiPending(true)
+    setIsAiOpen(true)
+    setStatusMessage('Canvex AI is thinking…')
+    try {
+      const result = await askCanvexApi(page.id, prompt, position)
+      // Render the reply straight from the HTTP response — no worker/WS wait.
+      addElementToCanvas(result.element)
+      setAiMessages((prev) => [
+        {
+          interactionId: result.interaction.id,
+          triggerType: result.interaction.trigger_type,
+          elementId: result.element.id,
+          content: result.answer,
+        },
+        ...prev.slice(0, 4),
+      ])
+      setStatusMessage(
+        result.source === 'gemini'
+          ? 'Canvex AI answered.'
+          : result.source === 'local-fallback'
+            ? 'Answered in offline mode — set GEMINI_API_KEY for real answers.'
+            : 'Answered in local mode — set GEMINI_API_KEY for real answers.',
+      )
+    } catch {
+      setAiPrompt(prompt) // restore so the question isn't lost
+      showToolMessage('Canvex AI could not answer. Please try again.')
+      setStatusMessage('')
+    } finally {
+      setAiPending(false)
+    }
+  }, [aiPrompt, page?.id, addElementToCanvas, showToolMessage])
 
   const sendAIFeedback = useCallback(
     async (interactionId: string, isCorrect: boolean) => {
@@ -2533,9 +2565,10 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
               className="workspace-input"
               placeholder="Ask about this canvas..."
               value={aiPrompt}
+              disabled={aiPending}
               onChange={(event) => setAiPrompt(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') {
+                if (event.key === 'Enter' && !aiPending) {
                   askCanvex()
                 }
               }}
@@ -2544,9 +2577,10 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
               type="button"
               className="workspace-action-button w-full justify-center"
               onClick={askCanvex}
+              disabled={aiPending}
             >
-              <Sparkles size={15} />
-              Ask
+              <Sparkles size={15} className={aiPending ? 'animate-pulse' : undefined} />
+              {aiPending ? 'Thinking…' : 'Ask'}
             </button>
             <div className="space-y-2">
               {aiMessages.length === 0 ? (

@@ -17,9 +17,16 @@ from app.models.element import WhiteboardElement
 from app.models.enums import AITriggerType, MemberRole
 from app.models.page import WhiteboardPage
 from app.models.user import User
-from app.schemas.ai import AIFeedbackCreate, AIFeedbackRead, AIInteractionRead, AISearchResult
+from app.schemas.ai import (
+    AIAskRequest,
+    AIAskResponse,
+    AIFeedbackCreate,
+    AIFeedbackRead,
+    AIInteractionRead,
+    AISearchResult,
+)
 from app.schemas.whiteboard import ElementRead
-from app.services.ai import embed_text
+from app.services.ai import answer_question_now, embed_text
 from app.services.elements import assert_minimum_role, get_channel_membership_for_user, get_page_or_404
 
 router = APIRouter(tags=["ai"])
@@ -109,6 +116,37 @@ async def submit_ai_feedback(
         is_correct=feedback.is_correct,
         correction_text=feedback.correction_text,
         created_at=feedback.created_at,
+    )
+
+
+@router.post("/pages/{page_id}/ask", response_model=AIAskResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)  # plan 12.2: Gemini cost abuse
+async def ask_canvex(
+    request: Request,
+    page_id: UUID,
+    payload: AIAskRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AIAskResponse:
+    """Answer a question synchronously and drop the reply onto the canvas. Unlike
+    the canvas-trigger path (queued to the AI worker), this returns the answer in
+    the HTTP response, so the asker sees it instantly with no worker running."""
+    page = await assert_page_access(db, page_id, current_user.id, MemberRole.EDITOR)
+    position = payload.position
+    element, interaction, source, answer = await answer_question_now(
+        db,
+        page=page,
+        question=payload.question,
+        snapshot_b64=payload.snapshot_b64,
+        pos_x=position.x if position else None,
+        pos_y=position.y if position else None,
+    )
+    return AIAskResponse(
+        answer=answer,
+        source=source,
+        element=ElementRead.model_validate(element),
+        interaction=interaction_read(interaction),
+        latency_ms=interaction.latency_ms or 0,
     )
 
 

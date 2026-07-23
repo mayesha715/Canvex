@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import math
+import random
 import re
 import time
 from contextlib import suppress
@@ -27,6 +29,8 @@ from app.schemas.whiteboard import ElementCreate
 from app.services.element_events import element_state
 from app.services.elements import create_element_for_page
 from app.services.webhooks import dispatch_webhook_event_for_page
+
+logger = logging.getLogger("canvex.ai")
 
 MATH_PATTERN = re.compile(r"[-+]?\d*\.?\d*\s*x\s*(?:[+-]\s*\d+(?:\.\d+)?)?\s*=\s*[-+]?\d+(?:\.\d+)?", re.I)
 AI_RESPONSE_CHANNEL_PREFIX = "ai:response:"
@@ -173,9 +177,11 @@ async def build_prompt(
     page: WhiteboardPage,
     trigger_element: WhiteboardElement | None,
     trigger_type: AITriggerType,
+    trigger_text: str | None = None,
 ) -> str:
     corrections = await recent_corrections(db, page.channel_id)
-    trigger_text = content_text(dict(trigger_element.content or {})) if trigger_element else ""
+    if trigger_text is None:
+        trigger_text = content_text(dict(trigger_element.content or {})) if trigger_element else ""
     correction_block = "\n".join(
         f"- Prior incorrect answer correction: {feedback.correction_text}" for feedback in corrections
     )
@@ -183,15 +189,17 @@ async def build_prompt(
         correction_block = "- No prior corrections for this channel yet."
 
     return f"""You are Canvex AI, an assistant embedded in a collaborative notebook whiteboard.
-Help the user directly on the canvas. Be concise, educational, and return JSON only.
+Answer the user's request directly, correctly, and concisely. If it is a question,
+give the actual answer (with a short explanation or steps when useful). Write plain
+text suitable to drop onto the canvas — no markdown headers or code fences.
 
 Trigger type: {trigger_type.value}
-Trigger text: {trigger_text or "(none)"}
+User input: {trigger_text or "(none)"}
 
 Channel-specific corrections to respect:
 {correction_block}
 
-Return a JSON object with:
+Reply with a JSON object only, in this exact shape:
 {{"type":"text","content":"your answer"}}
 """
 
@@ -432,6 +440,86 @@ async def analyze_canvas_job(
         raise
 
     return interaction
+
+
+async def answer_question_now(
+    db: AsyncSession,
+    *,
+    page: WhiteboardPage,
+    question: str,
+    snapshot_b64: str | None = None,
+    pos_x: float | None = None,
+    pos_y: float | None = None,
+) -> tuple[WhiteboardElement, AIInteraction, str, str]:
+    """Answer a question synchronously, in the request, with no queue/worker.
+
+    Runs Gemini (or the local fallback) inline, drops the answer onto the canvas
+    as a text element, records the interaction, and returns everything the caller
+    needs to render the reply instantly. Gemini failures degrade to the local
+    fallback so the user always gets an immediate answer."""
+    started = time.perf_counter()
+    snapshot_url = save_snapshot(snapshot_b64)
+    prompt = await build_prompt(
+        db, page=page, trigger_element=None, trigger_type=AITriggerType.EXPLICIT, trigger_text=question
+    )
+    interaction = AIInteraction(
+        page_id=page.id,
+        trigger_element_id=None,
+        trigger_type=AITriggerType.EXPLICIT,
+        canvas_snapshot_url=snapshot_url,
+        prompt_sent=prompt,
+        status="pending",
+    )
+    db.add(interaction)
+    await db.flush()
+
+    error_message: str | None = None
+    try:
+        response_json, input_tokens, output_tokens = await call_gemini_or_local(
+            prompt=prompt,
+            trigger_type=AITriggerType.EXPLICIT,
+            trigger_text=question,
+            snapshot_path=snapshot_url,
+        )
+        source = "gemini" if settings.gemini_api_key else "local"
+    except Exception as exc:  # bad key/model/network → still answer, but say so
+        logger.warning("Gemini ask failed; using local fallback: %s", exc)
+        response_json = local_ai_response(AITriggerType.EXPLICIT, question)
+        input_tokens = output_tokens = None
+        source = "local-fallback"
+        error_message = str(exc)[:500]
+
+    text = (response_json.get("content") or "I could not produce a response.").strip()
+    x = pos_x if pos_x is not None else 180.0 + random.uniform(-24, 24)
+    y = pos_y if pos_y is not None else 140.0 + random.uniform(-24, 24)
+    response_element = await create_element_for_page(
+        db,
+        page_id=page.id,
+        payload=ElementCreate(
+            type=ElementType.TEXT,
+            transform={"x": float(x), "y": float(y), "scaleX": 1, "scaleY": 1, "rotation": 0},
+            style={"stroke": "#4f46e5", "fill": "#4f46e5", "strokeWidth": 1},
+            content={"text": text, "source": "ai", "interaction_id": str(interaction.id)},
+        ),
+        actor_id=None,
+    )
+    # Skip the extra Gemini embedding round-trip to stay snappy; the local
+    # deterministic embedding is free and keeps answers semantically searchable.
+    if not settings.gemini_api_key:
+        with suppress(Exception):
+            response_element.embedding = deterministic_embedding(text)
+    await db.flush()
+
+    interaction.response_json = response_json
+    interaction.response_element_id = response_element.id
+    interaction.input_tokens = input_tokens
+    interaction.output_tokens = output_tokens
+    interaction.latency_ms = int((time.perf_counter() - started) * 1000)
+    interaction.status = "succeeded"
+    interaction.error_message = error_message
+    await db.commit()
+    await db.refresh(response_element)
+    return response_element, interaction, source, text
 
 
 async def update_text_embedding_if_needed(db: AsyncSession, element: WhiteboardElement) -> None:

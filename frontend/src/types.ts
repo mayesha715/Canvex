@@ -188,6 +188,14 @@ export type PageAnalytics = {
   }
 }
 
+export type AIAskResponse = {
+  answer: string
+  source: 'gemini' | 'local' | 'local-fallback'
+  element: Element
+  interaction: AIInteraction
+  latency_ms: number
+}
+
 export type AIInteraction = {
   id: string
   page_id: string

@@ -2,6 +2,7 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { clearSession, loadSession, saveSession } from './storage'
 import type {
+  AIAskResponse,
   AIInteraction,
   AuditPageResult,
   AuthConfig,
@@ -219,6 +220,17 @@ export const uploadImage = async (file: File): Promise<{ url: string }> => {
 
 export const listPageAiLog = async (pageId: string): Promise<AIInteraction[]> => {
   const { data } = await apiClient.get(`/pages/${pageId}/ai-log`)
+  return data
+}
+
+// Ask Canvex a question synchronously — the answer + created canvas element come
+// back in the HTTP response (no AI worker/queue), so it appears instantly.
+export const askCanvex = async (
+  pageId: string,
+  question: string,
+  position?: { x: number; y: number },
+): Promise<AIAskResponse> => {
+  const { data } = await apiClient.post(`/pages/${pageId}/ask`, { question, position })
   return data
 }
 
