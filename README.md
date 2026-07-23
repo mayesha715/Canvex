@@ -4,7 +4,9 @@ Canvex is a collaborative whiteboard project built around FastAPI, PostgreSQL, R
 
 ## Current Phase
 
-Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phase 12 (production hardening) is complete. Phase 13 (deployment) is deploy-ready: the code and config artifacts are in place (`render.yaml` Blueprint, `backend/Procfile`, `frontend/vercel.json`, `.github/workflows/deploy.yml` CI/CD, boot-time migrations, provider-URL normalisation) — see [DEPLOYMENT.md](DEPLOYMENT.md) for the step-by-step. The remaining work is provisioning on the hosting dashboards (Render + Vercel accounts, env vars), which only you can do.
+Phases 0–10 are implemented: audit log querying, session replay, Git-style board branching, the AI pipeline, plus the Phase 10 analytics, webhooks, export, and share-link features. Phase 11 (complete UI) is complete — member/role management with online-now dots, invite create/join, audit log viewer with click-to-highlight, branch/diff/merge UI, session replay player with pause/resume and timeline scrubbing, freehand pen, math input, image upload, undo/redo, zoom, canvas analytics, and PNG/PDF export are all reachable from the UI. Phase 12 (production hardening) is complete. Phase 13 (deployment) is done: the code and config artifacts are in place (`render.yaml` Blueprint, `backend/Procfile`, `frontend/vercel.json`, `.github/workflows/deploy.yml` CI/CD, boot-time migrations, provider-URL normalisation) — see [DEPLOYMENT.md](DEPLOYMENT.md) for the step-by-step — and the app is deployed on Render (backend + workers + Postgres + Redis) and Vercel (frontend).
+
+Since deployment, three feature sets have landed — **Google and institutional-email sign-in**, **instant synchronous AI question-answering**, and **multimodal handwriting support** (the AI reads the canvas) — documented in the dated sections at the end of this file.
 
 - SQLAlchemy 2.0 async models
 - Alembic migration setup
@@ -230,3 +232,26 @@ A full-codebase review against the implementation plan fixed ten bugs:
 - Backend: PNG/PDF export rendering runs off the event loop.
 - Backend: page point-in-time restore soft-deletes elements that did not yet exist at the target timestamp.
 - Backend: REST element update/delete now respect Redis element locks (423), matching the WebSocket path.
+
+## Deployment (2026-07-20)
+
+- Deployed to production: FastAPI backend + AI worker + webhook worker + managed PostgreSQL + Redis on **Render** (via the `render.yaml` Blueprint), and the React frontend on **Vercel**.
+- Database URL normalisation rewrites `postgres://` / `postgresql://` (what Render/Railway hand out) to `postgresql+asyncpg://` and strips `sslmode`, so the same code runs locally and in production.
+- Migrations run automatically on boot in production (FastAPI lifespan → `alembic upgrade head`); a failed migration aborts startup so a bad deploy fails loudly.
+- CORS is configured from `CORS_ALLOW_ORIGINS` (comma-separated Vercel domain(s)); the app refuses to boot in `ENVIRONMENT=production` with a wildcard origin or the default JWT secret.
+- See [DEPLOYMENT.md](DEPLOYMENT.md) for the full first-to-last guide, including the Render/Vercel dashboard steps and the production checklist.
+
+## Social & Institutional Sign-In (2026-07-22)
+
+- **Sign in with Google** — Google Identity Services renders the button in the frontend; the backend verifies the Google ID token server-side with `google-auth` and issues the normal Canvex token pair. `POST /auth/google`.
+- The Google **client ID lives only on the backend** (`GOOGLE_CLIENT_ID`) and is served to the frontend via the public `GET /auth/config`, so it's configured in one place. Blank → the button stays hidden.
+- **Institutional Login** — `POST /auth/institutional/register` gates email/password registration to institutional domains. Any `.edu` / `.ac` domain (`.edu`, `.edu.bd`, `.ac`, `.ac.uk`, `.ac.bd`, …) is always accepted; `INSTITUTIONAL_EMAIL_DOMAINS` only *adds* further domains, it never restricts. The domain is checked on account creation; existing accounts always sign in.
+- `users.password_hash` is now nullable (OAuth-only accounts have no password) with a unique `google_sub` link column — accounts link by verified email. Migration `202607220001`.
+- Config lives on the backend only; see [DEPLOYMENT.md §13.5b](DEPLOYMENT.md) for the Google Cloud Console setup.
+
+## Instant, Multimodal AI Answers (2026-07-22)
+
+- **Synchronous ask endpoint** `POST /pages/{page_id}/ask` — runs Gemini (or the deterministic local fallback) *inline* and returns the answer plus the created canvas element in the HTTP response. No ARQ worker or Redis queue in the path, so answers appear immediately even if the AI worker isn't running. The "Ask Canvex" box now uses this and renders the reply at the current view with a "Thinking…" state.
+- **Reads your handwriting** — the Ask flow attaches a downscaled (≤1536px) PNG snapshot of the current canvas view; the backend forwards it to the Gemini vision model and the prompt instructs it to interpret handwriting, equations, diagrams, and drawings. Falls back to text-only if the canvas can't be exported (e.g. a cross-origin image taints it).
+- **Resilient** — a Gemini error (bad key/model/network) degrades to the local fallback so the user always gets an instant answer; the UI reports the source (real Gemini vs offline/local mode).
+- Config: set `GEMINI_API_KEY` for real answers and `GEMINI_VISION_MODEL` to a current multimodal model (e.g. `gemini-3.5-flash`); blank key → local development fallback. The original canvas-trigger path (typing `?`, `/ai`, dropping an image) still enqueues to the AI worker.
