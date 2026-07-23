@@ -53,7 +53,7 @@ services:
       - key: GOOGLE_CLIENT_ID
         sync: false # Google OAuth web client ID (blank → Google button hidden)
       - key: INSTITUTIONAL_EMAIL_DOMAINS
-        sync: false # e.g. "edu,edu.bd" (blank → any .edu/.ac. accepted)
+        sync: false # extra domains beyond built-in .edu/.ac (blank → just .edu/.ac)
 
   # ── ARQ AI worker ─────────────────────────────────────────────
   - type: worker

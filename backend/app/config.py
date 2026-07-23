@@ -45,9 +45,9 @@ class Settings(BaseSettings):
     # POST /auth/google returns 503. The client ID is public, so the backend is
     # the single source of truth and serves it to the frontend via /auth/config.
     google_client_id: str = ""
-    # Allowlist for "Institutional Login". Comma-separated domain suffixes, e.g.
-    # "mit.edu,edu.bd" or just "edu". Empty → any academic-looking address
-    # (domain containing ".edu" or ".ac.") is accepted. See email_is_institutional.
+    # Extra institutional domains for "Institutional Login", *beyond* the
+    # built-in .edu / .ac acceptance. Comma-separated suffixes, e.g.
+    # "campus.example.org". Any .edu / .ac email always works regardless.
     institutional_email_domains: Annotated[list[str], NoDecode] = []
     # None → auto: run migrations on boot in production only (plan 13.7).
     # Override with RUN_MIGRATIONS_ON_STARTUP=true/false.
@@ -103,14 +103,20 @@ settings = get_settings()
 def email_is_institutional(email: str, allowed_domains: list[str] | None = None) -> bool:
     """Whether an email belongs to an institution.
 
-    With an explicit allowlist, the domain must end with one of the entries
-    (so "edu.bd" matches "univ.edu.bd" and "mit.edu" matches exactly). With an
-    empty allowlist, fall back to a generic academic heuristic: the domain
-    contains ".edu" or ".ac." (covers .edu, .edu.bd, .ac.uk, .ac.bd, …)."""
+    Any academic domain is always accepted — a domain label of "edu" or "ac"
+    covers .edu, .edu.bd, .ac, .ac.uk, .ac.bd, university.ac.jp, and so on.
+    ``allowed_domains`` (from INSTITUTIONAL_EMAIL_DOMAINS) only *adds* further
+    accepted domains for institutions on a non-academic domain; it never
+    restricts the built-in .edu / .ac acceptance."""
     domain = email.strip().lower().rsplit("@", maxsplit=1)[-1]
     if not domain or "." not in domain:
         return False
+    labels = domain.split(".")
+    if "edu" in labels or "ac" in labels:
+        return True
     domains = allowed_domains if allowed_domains is not None else settings.institutional_email_domains
-    if domains:
-        return any(domain == d.lower() or domain.endswith("." + d.lower().lstrip(".")) for d in domains)
-    return ".edu" in domain or ".ac." in domain
+    for entry in domains:
+        d = entry.strip().lower().lstrip(".")
+        if d and (domain == d or domain.endswith("." + d)):
+            return True
+    return False

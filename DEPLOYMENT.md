@@ -109,9 +109,12 @@ Both live under the "or" divider on the login screen. The frontend reads
 the backend** — nothing to set in Vercel.
 
 **Institutional Login** works out of the box (no setup): it registers/authenticates
-with the existing password system but requires an institutional email. Restrict the
-allowed domains with `INSTITUTIONAL_EMAIL_DOMAINS` (comma-separated, e.g.
-`edu,edu.bd`); leave it blank to accept any `.edu` / `.ac.` address.
+with the existing password system but requires an institutional email. Any `.edu`
+or `.ac` domain is always accepted (`.edu`, `.edu.bd`, `.ac`, `.ac.uk`, `.ac.bd`,
+…). `INSTITUTIONAL_EMAIL_DOMAINS` (comma-separated) only *adds* further domains
+for an institution on a non-academic domain — it never restricts `.edu` / `.ac`.
+The domain is checked when **creating** an account; existing accounts can always
+sign in.
 
 **Sign in with Google** stays hidden until you set `GOOGLE_CLIENT_ID`:
 

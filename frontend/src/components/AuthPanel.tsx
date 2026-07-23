@@ -68,15 +68,15 @@ const describeAuthError = (err: unknown, fallback: string): string => {
 const emailIsInstitutional = (email: string, domains: string[]): boolean => {
   const domain = (email.split('@')[1] ?? '').trim().toLowerCase()
   if (!domain || !domain.includes('.')) return false
-  if (domains.length) {
-    return domains.some((raw) => {
-      const d = raw.trim().toLowerCase().replace(/^\./, '')
-      return domain === d || domain.endsWith('.' + d)
-    })
-  }
-  // No explicit allowlist → accept generic academic domains (.edu, .edu.bd,
-  // .ac.uk, .ac.bd, …) — matches the backend's default heuristic.
-  return domain.includes('.edu') || domain.includes('.ac.')
+  // Any academic domain always passes: a label of "edu" or "ac" covers .edu,
+  // .edu.bd, .ac, .ac.uk, .ac.bd, university.ac.jp … (matches the backend).
+  const labels = domain.split('.')
+  if (labels.includes('edu') || labels.includes('ac')) return true
+  // Configured extras only *add* non-academic institutional domains.
+  return domains.some((raw) => {
+    const d = raw.trim().toLowerCase().replace(/^\.+/, '')
+    return d !== '' && (domain === d || domain.endsWith('.' + d))
+  })
 }
 
 const defaultState = { email: '', displayName: '', password: '' }
@@ -94,11 +94,9 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
   const googleButtonRef = useRef<HTMLDivElement | null>(null)
 
   const domainsLabel = authConfig.institutional_domains.length
-    ? authConfig.institutional_domains.join(', ')
-    : 'institutional (.edu)'
-  const institutionalHint = authConfig.institutional_domains.length
-    ? `Use your institutional email (${authConfig.institutional_domains.join(', ')}).`
-    : 'Use your institutional email address, e.g. name@university.edu.'
+    ? `.edu / .ac / ${authConfig.institutional_domains.join(' / ')}`
+    : '.edu / .ac'
+  const institutionalHint = `Use your institutional email (${domainsLabel}), e.g. name@university.ac.bd.`
 
   const showComingSoon = (feature: string) => {
     setError('')
@@ -166,7 +164,9 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
     setError('')
     setNotice('')
 
-    if (institutional && !emailIsInstitutional(form.email, authConfig.institutional_domains)) {
+    // Only gate account *creation* by domain — an existing account can always
+    // sign in regardless of how its email looks.
+    if (institutional && mode === 'register' && !emailIsInstitutional(form.email, authConfig.institutional_domains)) {
       setError(institutionalHint)
       return
     }
@@ -241,7 +241,9 @@ const AuthPanel = ({ onAuthenticated }: AuthPanelProps) => {
           <div className="mt-5 flex w-full items-center justify-between gap-3 rounded-lg border border-indigo-200 bg-indigo-50/70 px-4 py-2 text-sm text-indigo-800 backdrop-blur-sm">
             <span className="flex items-center gap-2 font-semibold">
               <GraduationCap size={16} />
-              Institutional access — {domainsLabel} email
+              {mode === 'register'
+                ? `New institutional account — use your ${domainsLabel} email`
+                : `Institutional sign-in — use your ${domainsLabel} email`}
             </span>
             <button
               type="button"
