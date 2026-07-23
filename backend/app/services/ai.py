@@ -178,6 +178,7 @@ async def build_prompt(
     trigger_element: WhiteboardElement | None,
     trigger_type: AITriggerType,
     trigger_text: str | None = None,
+    has_image: bool = False,
 ) -> str:
     corrections = await recent_corrections(db, page.channel_id)
     if trigger_text is None:
@@ -187,13 +188,20 @@ async def build_prompt(
     )
     if not correction_block:
         correction_block = "- No prior corrections for this channel yet."
+    image_note = (
+        "An image of the user's handwritten notebook canvas is attached. Carefully read any "
+        "handwriting, equations, diagrams, and drawings in it — interpret messy or cursive "
+        "handwriting as best you can — and use what you see to answer.\n\n"
+        if has_image
+        else ""
+    )
 
     return f"""You are Canvex AI, an assistant embedded in a collaborative notebook whiteboard.
 Answer the user's request directly, correctly, and concisely. If it is a question,
 give the actual answer (with a short explanation or steps when useful). Write plain
 text suitable to drop onto the canvas — no markdown headers or code fences.
 
-Trigger type: {trigger_type.value}
+{image_note}Trigger type: {trigger_type.value}
 User input: {trigger_text or "(none)"}
 
 Channel-specific corrections to respect:
@@ -460,7 +468,12 @@ async def answer_question_now(
     started = time.perf_counter()
     snapshot_url = save_snapshot(snapshot_b64)
     prompt = await build_prompt(
-        db, page=page, trigger_element=None, trigger_type=AITriggerType.EXPLICIT, trigger_text=question
+        db,
+        page=page,
+        trigger_element=None,
+        trigger_type=AITriggerType.EXPLICIT,
+        trigger_text=question,
+        has_image=bool(snapshot_url),
     )
     interaction = AIInteraction(
         page_id=page.id,

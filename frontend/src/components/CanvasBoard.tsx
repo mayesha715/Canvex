@@ -1203,12 +1203,24 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       position = undefined // backend picks a default spot
     }
 
+    // Snapshot the current view so Gemini can read handwriting/drawings. Capped
+    // to keep the payload small and the answer fast. Fails safe to text-only
+    // (e.g. a tainted canvas from a cross-origin image).
+    let snapshot: string | undefined
+    try {
+      const maxDim = Math.max(canvas.getWidth(), canvas.getHeight()) || 1536
+      const multiplier = Math.min(1, 1536 / maxDim)
+      snapshot = canvas.toDataURL({ format: 'png', multiplier, enableRetinaScaling: false })
+    } catch {
+      snapshot = undefined
+    }
+
     setAiPrompt('')
     setAiPending(true)
     setIsAiOpen(true)
-    setStatusMessage('Canvex AI is thinking…')
+    setStatusMessage('Canvex AI is reading your canvas…')
     try {
-      const result = await askCanvexApi(page.id, prompt, position)
+      const result = await askCanvexApi(page.id, prompt, position, snapshot)
       // Render the reply straight from the HTTP response — no worker/WS wait.
       addElementToCanvas(result.element)
       setAiMessages((prev) => [

@@ -229,8 +229,13 @@ export const askCanvex = async (
   pageId: string,
   question: string,
   position?: { x: number; y: number },
+  snapshotB64?: string,
 ): Promise<AIAskResponse> => {
-  const { data } = await apiClient.post(`/pages/${pageId}/ask`, { question, position })
+  const { data } = await apiClient.post(`/pages/${pageId}/ask`, {
+    question,
+    position,
+    snapshot_b64: snapshotB64,
+  })
   return data
 }
 
