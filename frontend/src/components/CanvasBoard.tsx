@@ -3,7 +3,6 @@ import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
   Brush,
-  Check,
   Circle,
   Eraser,
   Highlighter,
@@ -12,23 +11,19 @@ import {
   Move,
   MoveUpRight,
   PenLine,
-  Plus,
   RectangleHorizontal,
   Redo2,
-  SendHorizontal,
   Sigma,
   Sparkles,
   StickyNote,
   Text,
-  ThumbsDown,
-  ThumbsUp,
   Undo2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { askCanvex as askCanvexApi, createShareLink, getPresenceCount, listElements, listPageAiLog, submitAIFeedback, uploadImage } from '../lib/api'
+import { createShareLink, getPresenceCount, listElements, solvePage as solvePageApi, uploadImage } from '../lib/api'
 import { colorFromId } from '../lib/colors'
 import {
   getClientId,
@@ -40,7 +35,7 @@ import {
   type VectorClock,
 } from '../lib/offlineSync'
 import { loadSession } from '../lib/storage'
-import type { AITriggerType, Element, ElementType, PageSummary, User } from '../types'
+import type { Element, ElementType, PageSummary, User } from '../types'
 
 type Tool = 'select' | 'pen' | 'pencil' | 'highlighter' | 'eraser' | 'rect' | 'ellipse' | 'arrow' | 'text' | 'sticky'
 
@@ -132,15 +127,6 @@ const TOOL_LABELS: Record<Tool, string> = {
   sticky: 'Sticky Note',
 }
 
-type AIMessage = {
-  interactionId: string
-  triggerType: AITriggerType
-  content: string
-  source?: 'gemini' | 'local' | 'local-fallback'
-  added?: boolean
-  elementId?: string
-}
-
 const DEFAULT_RECT = { width: 140, height: 90 }
 const DEFAULT_ELLIPSE = { rx: 60, ry: 40 }
 
@@ -197,12 +183,9 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
   const [presenceCount, setPresenceCount] = useState(0)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [strokeColor, setStrokeColor] = useState('#0f172a')
-  const [isAiOpen, setIsAiOpen] = useState(false)
   const [isMathOpen, setIsMathOpen] = useState(false)
   const [mathInput, setMathInput] = useState('')
-  const [aiPrompt, setAiPrompt] = useState('')
-  const [aiPending, setAiPending] = useState(false)
-  const [aiMessages, setAiMessages] = useState<AIMessage[]>([])
+  const [aiSolving, setAiSolving] = useState(false)
   const [isLoadingPage, setIsLoadingPage] = useState(false)
   const [isOffline, setIsOffline] = useState(!navigator.onLine)
   const [queuedOpsCount, setQueuedOpsCount] = useState(0)
@@ -1181,21 +1164,14 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     }
   }, [page, showToolMessage])
 
-  const askCanvex = useCallback(async () => {
+  // The one AI action: scan the whole page and drop an answer next to every
+  // problem that needs one. No dialog — a floating button triggers this.
+  const solvePage = useCallback(async () => {
     const canvas = fabricRef.current
-    const prompt = aiPrompt.trim()
     if (!page?.id || !canvas) {
-      showToolMessage('Create or select a page before asking Canvex.')
+      showToolMessage('Open a page first.')
       return
     }
-    if (!prompt) {
-      showToolMessage('Write a question for Canvex first.')
-      return
-    }
-
-    // Snapshot the current view so Gemini can read handwriting/drawings. Capped
-    // to keep the payload small and the answer fast. Fails safe to text-only
-    // (e.g. a tainted canvas from a cross-origin image).
     let snapshot: string | undefined
     try {
       const maxDim = Math.max(canvas.getWidth(), canvas.getHeight()) || 1536
@@ -1204,105 +1180,66 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     } catch {
       snapshot = undefined
     }
-
-    setAiPrompt('')
-    setAiPending(true)
-    setIsAiOpen(true)
-    setStatusMessage('Canvex AI is reading your canvas…')
-    try {
-      const result = await askCanvexApi(page.id, prompt, snapshot)
-      // Show the answer in the panel; the user decides whether to add it.
-      setAiMessages((prev) => [
-        {
-          interactionId: result.interaction.id,
-          triggerType: result.interaction.trigger_type,
-          content: result.answer,
-          source: result.source,
-          added: false,
-        },
-        ...prev.slice(0, 19),
-      ])
-      setStatusMessage(
-        result.source === 'gemini'
-          ? 'Canvex AI answered.'
-          : 'Answered in local mode — set GEMINI_API_KEY for real answers.',
-      )
-    } catch {
-      setAiPrompt(prompt) // restore so the question isn't lost
-      showToolMessage('Canvex AI could not answer. Please try again.')
-      setStatusMessage('')
-    } finally {
-      setAiPending(false)
+    if (!snapshot) {
+      showToolMessage('Could not read the canvas to scan.')
+      return
     }
-  }, [aiPrompt, page?.id, showToolMessage])
 
-  // Place an AI answer onto the canvas as a normal, fully-editable text element
-  // (drag to move, corner handles to resize, Delete/eraser to remove). It syncs
-  // to collaborators and is undoable via the standard object:added path.
-  const addAnswerToCanvas = useCallback(
-    (message: AIMessage) => {
-      const canvas = fabricRef.current
-      if (!canvas) {
-        showToolMessage('Open a page first.')
+    setAiSolving(true)
+    setStatusMessage('Canvex AI is scanning the page…')
+    try {
+      const result = await solvePageApi(page.id, snapshot)
+      if (result.answers.length === 0) {
+        showToolMessage(
+          result.source === 'gemini'
+            ? 'Nothing on the page needs an answer yet.'
+            : 'Scanning the page needs a Gemini vision model — set GEMINI_API_KEY.',
+        )
         return
       }
-      let left = 200
-      let top = 160
-      try {
-        const zoom = canvas.getZoom() || 1
-        const vpt = canvas.viewportTransform
-        if (vpt) {
-          left = (canvas.getWidth() / 2 - vpt[4]) / zoom - 170
-          top = (canvas.getHeight() / 2 - vpt[5]) / zoom - 60
+      const zoom = canvas.getZoom() || 1
+      const vpt = canvas.viewportTransform
+      const width = canvas.getWidth()
+      const height = canvas.getHeight()
+      let stackIndex = 0
+      result.answers.forEach((item) => {
+        let left: number
+        let top: number
+        if (vpt && item.x != null && item.y != null) {
+          // Normalised image position → scene coords, nudged just past the problem.
+          left = (item.x * width - vpt[4]) / zoom + 14
+          top = (item.y * height - vpt[5]) / zoom + 14
+        } else {
+          // No position → stack the answers down the left of the view.
+          left = vpt ? (24 - vpt[4]) / zoom : 40
+          top = (vpt ? (90 - vpt[5]) / zoom : 90) + stackIndex * 96
+          stackIndex += 1
         }
-      } catch {
-        left = 200
-        top = 160
-      }
-      const textbox = new Textbox(message.content, {
-        left,
-        top,
-        width: 340,
-        fontSize: 22,
-        fontFamily: 'Caveat, cursive',
-        fill: '#3730a3',
-        lineHeight: 1.25,
-        padding: 6,
-      }) as CanvasObject
-      textbox.canvexType = 'text'
-      canvas.add(textbox)
-      canvas.setActiveObject(textbox)
+        const textbox = new Textbox(item.answer, {
+          left,
+          top,
+          width: 300,
+          fontSize: 20,
+          fontFamily: 'Caveat, cursive',
+          fill: '#3730a3',
+          lineHeight: 1.25,
+          padding: 6,
+        }) as CanvasObject
+        textbox.canvexType = 'text'
+        canvas.add(textbox) // object:added persists + syncs each answer
+      })
       setTool('select')
       canvas.requestRenderAll()
-      setAiMessages((prev) =>
-        prev.map((m) => (m.interactionId === message.interactionId ? { ...m, added: true } : m)),
+      setStatusMessage(
+        `Canvex AI answered ${result.answers.length} ${result.answers.length === 1 ? 'item' : 'items'} on the page — drag, resize, or delete any.`,
       )
-      setStatusMessage('Answer added — drag to move, corner handles to resize, Delete to remove.')
-    },
-    [setTool, showToolMessage],
-  )
-
-  const sendAIFeedback = useCallback(
-    async (interactionId: string, isCorrect: boolean) => {
-      const correctionText = isCorrect
-        ? null
-        : window.prompt('What should Canvex remember for next time?')
-      if (!isCorrect && !correctionText?.trim()) {
-        showToolMessage('Feedback cancelled. Add a correction so Canvex can learn from it.')
-        return
-      }
-      try {
-        await submitAIFeedback(interactionId, {
-          is_correct: isCorrect,
-          correction_text: correctionText?.trim() || null,
-        })
-        showToolMessage(isCorrect ? 'Marked as helpful.' : 'Correction saved for future prompts.')
-      } catch {
-        showToolMessage('Could not save AI feedback.')
-      }
-    },
-    [showToolMessage],
-  )
+    } catch {
+      showToolMessage('Canvex AI could not scan the page. Please try again.')
+      setStatusMessage('')
+    } finally {
+      setAiSolving(false)
+    }
+  }, [page?.id, setTool, showToolMessage])
 
   const applyStrokeColor = useCallback(
     (color: string) => {
@@ -2024,23 +1961,8 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
             return
           }
           case 'ai:response': {
-            const payload = message.payload as {
-              element: Element
-              interaction_id: string
-              trigger_type: AITriggerType
-            }
+            const payload = message.payload as { element: Element }
             addElementToCanvas(payload.element)
-            setAiMessages((prev) => [
-              {
-                interactionId: payload.interaction_id,
-                triggerType: payload.trigger_type,
-                elementId: payload.element.id,
-                content: String(payload.element.content.text ?? 'AI response added to canvas.'),
-                added: true, // canvas-trigger answers are placed automatically
-              },
-              ...prev.slice(0, 19),
-            ])
-            setIsAiOpen(true)
             setStatusMessage('Canvex AI added a response.')
             return
           }
@@ -2095,39 +2017,6 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     wsRetryNonce,
   ])
 
-  useEffect(() => {
-    const pageId = page?.id
-    if (!pageId) {
-      setAiMessages([])
-      return
-    }
-    let cancelled = false
-    const loadAiLog = async () => {
-      try {
-        const interactions = await listPageAiLog(pageId)
-        if (cancelled) return
-        setAiMessages(
-          interactions
-            .filter((interaction) => interaction.status === 'succeeded' && interaction.response_json?.content)
-            .slice(0, 5)
-            .map((interaction) => ({
-              interactionId: interaction.id,
-              triggerType: interaction.trigger_type,
-              elementId: interaction.response_element_id ?? undefined,
-              content: String(interaction.response_json?.content ?? ''),
-            })),
-        )
-      } catch {
-        if (!cancelled) {
-          setAiMessages([])
-        }
-      }
-    }
-    loadAiLog()
-    return () => {
-      cancelled = true
-    }
-  }, [page?.id])
 
   useEffect(() => {
     const pageId = page?.id
@@ -2186,10 +2075,6 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
         </div>
         <div className="workspace-presence">
           <div className="workspace-avatar">{user.display_name.slice(0, 2).toUpperCase()}</div>
-          <button type="button" className="workspace-ai-button" onClick={() => setIsAiOpen((prev) => !prev)}>
-            <Sparkles size={15} />
-            <span className="workspace-ai-label">Ask Canvex</span>
-          </button>
         </div>
         <div className="workspace-tool-capsule opacity-60">
           <span className="hidden font-reading-serif text-lg text-slate-700/80 md:inline">Canvex</span>
@@ -2214,22 +2099,6 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
             </p>
           </div>
         </div>
-        {isAiOpen && (
-          <aside className="workspace-ai-panel">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-reading-serif text-lg text-indigo-700">Ask Canvex</h3>
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">AI notebook assistant</p>
-              </div>
-              <button type="button" className="workspace-ghost-button" onClick={() => setIsAiOpen(false)}>
-                Close
-              </button>
-            </div>
-            <p className="mt-5 rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 text-sm leading-6 text-slate-600">
-              Create a page first, then I can help summarize, explain, and organize your canvas.
-            </p>
-          </aside>
-        )}
       </div>
     )
   }
@@ -2259,10 +2128,6 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
         <button type="button" className="workspace-ai-button" onClick={handleShare} title="Copy a read-only share link">
           <Link2 size={15} />
           <span className="workspace-ai-label">Share</span>
-        </button>
-        <button type="button" className="workspace-ai-button" onClick={() => setIsAiOpen((prev) => !prev)}>
-          <Sparkles size={15} />
-          <span className="workspace-ai-label">Ask Canvex</span>
         </button>
       </div>
 
@@ -2593,111 +2458,16 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
           )
         })}
       </div>
-      {isAiOpen && (
-        <aside className="workspace-ai-panel">
-          <div className="flex shrink-0 items-center justify-between">
-            <div>
-              <h3 className="font-reading-serif text-lg text-indigo-700">Ask Canvex</h3>
-              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">AI notebook assistant</p>
-            </div>
-            <button type="button" className="workspace-ghost-button" onClick={() => setIsAiOpen(false)}>
-              Close
-            </button>
-          </div>
-          <div className="mt-5 shrink-0 space-y-2">
-            <input
-              className="workspace-input"
-              placeholder="Ask anything, or write it on the canvas…"
-              value={aiPrompt}
-              disabled={aiPending}
-              onChange={(event) => setAiPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !aiPending) {
-                  askCanvex()
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="workspace-action-button w-full justify-center"
-              onClick={askCanvex}
-              disabled={aiPending || !aiPrompt.trim()}
-            >
-              {aiPending ? (
-                <Sparkles size={15} className="animate-pulse" />
-              ) : (
-                <SendHorizontal size={15} />
-              )}
-              {aiPending ? 'Thinking…' : 'Ask Canvex'}
-            </button>
-          </div>
-
-          <div className="-mr-1 mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 text-sm leading-6 text-slate-600">
-            {aiMessages.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/30 p-5 text-center">
-                  <Sparkles size={20} className="text-indigo-400" />
-                  <p className="font-handwriting text-lg leading-6 text-slate-500">
-                    Ask a question — Canvex reads your canvas to answer, and you choose whether to drop the answer onto the page.
-                  </p>
-                </div>
-              ) : (
-                aiMessages.map((message) => (
-                  <article
-                    key={message.interactionId}
-                    className="rounded-xl border border-indigo-100 bg-gradient-to-br from-white to-indigo-50/40 p-4 shadow-sm"
-                  >
-                    <div className="mb-2 flex items-center gap-2">
-                      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100/70 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-indigo-700">
-                        <Sparkles size={11} /> Canvex AI
-                      </span>
-                      {message.source && message.source !== 'gemini' && (
-                        <span className="rounded-full bg-amber-100/80 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
-                          local mode
-                        </span>
-                      )}
-                    </div>
-                    <p className="whitespace-pre-wrap font-handwriting text-lg leading-6 text-slate-700">
-                      {message.content}
-                    </p>
-                    <div className="mt-3 flex items-center justify-between gap-2">
-                      {message.added ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600">
-                          <Check size={14} /> Added to canvas
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700"
-                          onClick={() => addAnswerToCanvas(message)}
-                        >
-                          <Plus size={14} /> Add to canvas
-                        </button>
-                      )}
-                      <div className="flex gap-1">
-                        <button
-                          type="button"
-                          className="workspace-icon-button"
-                          title="Helpful"
-                          onClick={() => sendAIFeedback(message.interactionId, true)}
-                        >
-                          <ThumbsUp size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          className="workspace-icon-button"
-                          title="Incorrect"
-                          onClick={() => sendAIFeedback(message.interactionId, false)}
-                        >
-                          <ThumbsDown size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  </article>
-                ))
-              )}
-            </div>
-        </aside>
-      )}
+      <button
+        type="button"
+        className="workspace-ai-fab"
+        onClick={solvePage}
+        disabled={aiSolving}
+        title="Scan the page and answer every problem that needs an answer"
+      >
+        <Sparkles size={18} className={aiSolving ? 'animate-pulse' : undefined} />
+        {aiSolving ? 'Scanning…' : 'Solve page'}
+      </button>
     </div>
   )
 }

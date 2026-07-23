@@ -2,8 +2,8 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { clearSession, loadSession, saveSession } from './storage'
 import type {
-  AIAskResponse,
   AIInteraction,
+  AISolveResponse,
   AuditPageResult,
   AuthConfig,
   AuthSession,
@@ -223,17 +223,11 @@ export const listPageAiLog = async (pageId: string): Promise<AIInteraction[]> =>
   return data
 }
 
-// Ask Canvex a question synchronously — the answer + created canvas element come
-// back in the HTTP response (no AI worker/queue), so it appears instantly.
-export const askCanvex = async (
-  pageId: string,
-  question: string,
-  snapshotB64?: string,
-): Promise<AIAskResponse> => {
-  const { data } = await apiClient.post(`/pages/${pageId}/ask`, {
-    question,
-    snapshot_b64: snapshotB64,
-  })
+// Scan the whole page image and get an answer for every problem that needs one,
+// each with a normalised position so the answer can be dropped next to it.
+// Synchronous (no AI worker/queue).
+export const solvePage = async (pageId: string, snapshotB64: string): Promise<AISolveResponse> => {
+  const { data } = await apiClient.post(`/pages/${pageId}/solve`, { snapshot_b64: snapshotB64 })
   return data
 }
 

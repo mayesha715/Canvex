@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import anyio
 from arq.connections import RedisSettings, create_pool
 from redis.asyncio import Redis
 from sqlalchemy import desc, select
@@ -510,6 +511,130 @@ async def answer_question_now(
     await db.commit()
     await db.refresh(interaction)
     return interaction, source, text
+
+
+SOLVE_PROMPT = """You are Canvex AI, embedded in a handwritten notebook whiteboard. An image of the
+current page is attached. Read it carefully — interpret messy or cursive handwriting, equations,
+and diagrams. Find EVERY question, problem, exercise, or equation on the page that still needs an
+answer or solution, and work out the correct answer for each.
+
+Return ONLY a JSON array. Each element must be:
+{"problem": "<short label of the problem>", "answer": "<the answer, concise, correct, plain text, no markdown>", "x": <horizontal position of the problem in the image from 0.0 (left) to 1.0 (right)>, "y": <vertical position from 0.0 (top) to 1.0 (bottom)>}
+
+x and y locate the problem in the image so the answer can be dropped next to it. Skip anything that
+is already answered. If nothing on the page needs answering, return []."""
+
+
+def _coord(value: object) -> float | None:
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    # Gemini sometimes returns 0–1000 or 0–100 instead of 0–1; normalise.
+    if f > 100:
+        f /= 1000.0
+    elif f > 1.5:
+        f /= 100.0
+    return min(1.0, max(0.0, f))
+
+
+def parse_solve_items(raw_text: str) -> list[dict[str, object]]:
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        cleaned = cleaned.removeprefix("json").strip()
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = data.get("answers") or data.get("items") or data.get("problems") or []
+    if not isinstance(data, list):
+        return []
+    items: list[dict[str, object]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        answer = entry.get("answer")
+        if not isinstance(answer, str) or not answer.strip():
+            continue
+        items.append(
+            {
+                "problem": str(entry.get("problem") or "")[:200],
+                "answer": answer.strip(),
+                "x": _coord(entry.get("x")),
+                "y": _coord(entry.get("y")),
+            }
+        )
+    return items[:20]
+
+
+def _gemini_vision_text(prompt: str, snapshot_path: str) -> tuple[str, int | None, int | None]:
+    import google.generativeai as genai
+
+    genai.configure(api_key=settings.gemini_api_key)
+    model = genai.GenerativeModel(settings.gemini_vision_model)
+    result = model.generate_content(
+        [prompt, {"mime_type": "image/png", "data": Path(snapshot_path).read_bytes()}]
+    )
+    usage = getattr(result, "usage_metadata", None)
+    return (
+        result.text or "",
+        getattr(usage, "prompt_token_count", None),
+        getattr(usage, "candidates_token_count", None),
+    )
+
+
+async def solve_page_now(
+    db: AsyncSession,
+    *,
+    page: WhiteboardPage,
+    snapshot_b64: str | None,
+) -> tuple[str, list[dict[str, object]], int]:
+    """Scan a whole page image and answer every problem that needs answering.
+
+    Returns (source, items, latency_ms) where each item is
+    {problem, answer, x, y} with x/y as normalised 0–1 positions (or None).
+    Needs a Gemini vision model — without a key or snapshot it returns no items."""
+    started = time.perf_counter()
+    snapshot_url = save_snapshot(snapshot_b64)
+    interaction = AIInteraction(
+        page_id=page.id,
+        trigger_element_id=None,
+        trigger_type=AITriggerType.EXPLICIT,
+        canvas_snapshot_url=snapshot_url,
+        prompt_sent=SOLVE_PROMPT,
+        status="pending",
+    )
+    db.add(interaction)
+    await db.flush()
+
+    items: list[dict[str, object]] = []
+    input_tokens = output_tokens = None
+    error_message: str | None = None
+    if not settings.gemini_api_key or not snapshot_url:
+        source = "local"  # local mode can't read the page image
+        error_message = None if settings.gemini_api_key else "no gemini key"
+    else:
+        try:
+            raw, input_tokens, output_tokens = await anyio.to_thread.run_sync(
+                _gemini_vision_text, SOLVE_PROMPT, snapshot_url
+            )
+            items = parse_solve_items(raw)
+            source = "gemini"
+        except Exception as exc:  # bad key/model/network
+            logger.warning("Gemini page scan failed: %s", exc)
+            source = "local-fallback"
+            error_message = str(exc)[:500]
+
+    interaction.response_json = {"answers": items}
+    interaction.input_tokens = input_tokens
+    interaction.output_tokens = output_tokens
+    interaction.latency_ms = int((time.perf_counter() - started) * 1000)
+    interaction.status = "succeeded"
+    interaction.error_message = error_message
+    await db.commit()
+    return source, items, interaction.latency_ms
 
 
 async def update_text_embedding_if_needed(db: AsyncSession, element: WhiteboardElement) -> None:

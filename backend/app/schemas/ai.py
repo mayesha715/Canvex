@@ -73,3 +73,22 @@ class AIAskResponse(BaseModel):
     source: str  # "gemini" | "local" | "local-fallback"
     interaction: AIInteractionRead
     latency_ms: int
+
+
+class AISolveRequest(BaseModel):
+    # Base64 PNG of the page for the vision model to scan.
+    snapshot_b64: str | None = None
+
+
+class AISolveItem(BaseModel):
+    problem: str
+    answer: str
+    # Normalised 0–1 position of the problem in the image (None → stack it).
+    x: float | None = None
+    y: float | None = None
+
+
+class AISolveResponse(BaseModel):
+    source: str  # "gemini" | "local" | "local-fallback"
+    answers: list[AISolveItem]
+    latency_ms: int

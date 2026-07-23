@@ -473,6 +473,10 @@
     @apply absolute bottom-6 right-6 z-[80] flex max-h-[calc(100vh-8rem)] w-80 flex-col overflow-hidden rounded-2xl border border-dashed border-indigo-300 bg-white/90 p-4 shadow-lg backdrop-blur-md;
   }
 
+  .workspace-ai-fab {
+    @apply absolute bottom-6 right-6 z-[80] inline-flex items-center gap-2 rounded-full bg-indigo-600 px-5 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-indigo-700 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-70;
+  }
+
   .workspace-action-rail {
     @apply absolute right-4 top-[4.75rem] z-40 flex flex-col items-center gap-1 rounded-full border border-slate-200/90 bg-white/75 px-1.5 py-2 text-slate-600 shadow-sm backdrop-blur-md;
   }

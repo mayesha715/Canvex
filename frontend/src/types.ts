@@ -188,10 +188,16 @@ export type PageAnalytics = {
   }
 }
 
-export type AIAskResponse = {
+export type AISolveItem = {
+  problem: string
   answer: string
+  x?: number | null
+  y?: number | null
+}
+
+export type AISolveResponse = {
   source: 'gemini' | 'local' | 'local-fallback'
-  interaction: AIInteraction
+  answers: AISolveItem[]
   latency_ms: number
 }
 

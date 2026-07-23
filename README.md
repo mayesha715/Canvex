@@ -262,3 +262,12 @@ A full-codebase review against the implementation plan fixed ten bugs:
 - **Answers are no longer auto-placed on the canvas.** `POST /pages/{page_id}/ask` now returns the answer text only; the panel displays it and each answer has an **Add to canvas** action, so the user chooses what lands on the page.
 - Added answers become **first-class editable text elements** — drag to move, corner handles to resize, Delete/eraser to remove — created through the standard element path, so they sync to collaborators and are undoable. Once added, the card shows "Added to canvas".
 - The panel now has a bounded height with a **scrollable answer list** (header + ask box stay pinned), so the Ask box no longer gets pushed off-screen as answers accumulate; the panel keeps the last 20 answers.
+
+## Page-Scan AI — Floating "Solve page" Button (2026-07-22)
+
+Replaces the type-a-question dialog above with a single-action model.
+
+- The "Ask Canvex" dialog (text box, answer cards, per-answer feedback) is **removed**. In its place is one **floating "Solve page" button**.
+- Pressing it scans the **whole page**: the frontend snapshots the current view and calls the new `POST /pages/{page_id}/solve`, which sends the image to the Gemini vision model and returns an answer for **every** problem/question/equation it finds — each with a normalised `x`/`y` position in the image.
+- The frontend drops each answer as an **editable text element next to its problem** (using the returned position; falls back to a neat stack when no position is given). Answers are normal elements — drag, resize, delete, sync, undo.
+- Synchronous (no AI worker). Needs `GEMINI_API_KEY` + a vision `GEMINI_VISION_MODEL` (e.g. `gemini-3.5-flash`); without them the button reports that a vision model is required. Robust JSON parsing tolerates code fences and 0–1 / 0–100 / 0–1000 coordinate scales.
