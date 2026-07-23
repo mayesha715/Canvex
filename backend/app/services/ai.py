@@ -5,7 +5,6 @@ import base64
 import json
 import logging
 import math
-import random
 import re
 import time
 from contextlib import suppress
@@ -456,15 +455,14 @@ async def answer_question_now(
     page: WhiteboardPage,
     question: str,
     snapshot_b64: str | None = None,
-    pos_x: float | None = None,
-    pos_y: float | None = None,
-) -> tuple[WhiteboardElement, AIInteraction, str, str]:
+) -> tuple[AIInteraction, str, str]:
     """Answer a question synchronously, in the request, with no queue/worker.
 
-    Runs Gemini (or the local fallback) inline, drops the answer onto the canvas
-    as a text element, records the interaction, and returns everything the caller
-    needs to render the reply instantly. Gemini failures degrade to the local
-    fallback so the user always gets an immediate answer."""
+    Runs Gemini (or the local fallback) inline and records the interaction, then
+    returns the answer as text. The answer is deliberately NOT placed on the
+    canvas — the caller shows it and lets the user decide whether to add it, so
+    the canvas isn't cluttered with unwanted replies. Gemini failures degrade to
+    the local fallback so the user always gets an immediate answer."""
     started = time.perf_counter()
     snapshot_url = save_snapshot(snapshot_b64)
     prompt = await build_prompt(
@@ -503,36 +501,15 @@ async def answer_question_now(
         error_message = str(exc)[:500]
 
     text = (response_json.get("content") or "I could not produce a response.").strip()
-    x = pos_x if pos_x is not None else 180.0 + random.uniform(-24, 24)
-    y = pos_y if pos_y is not None else 140.0 + random.uniform(-24, 24)
-    response_element = await create_element_for_page(
-        db,
-        page_id=page.id,
-        payload=ElementCreate(
-            type=ElementType.TEXT,
-            transform={"x": float(x), "y": float(y), "scaleX": 1, "scaleY": 1, "rotation": 0},
-            style={"stroke": "#4f46e5", "fill": "#4f46e5", "strokeWidth": 1},
-            content={"text": text, "source": "ai", "interaction_id": str(interaction.id)},
-        ),
-        actor_id=None,
-    )
-    # Skip the extra Gemini embedding round-trip to stay snappy; the local
-    # deterministic embedding is free and keeps answers semantically searchable.
-    if not settings.gemini_api_key:
-        with suppress(Exception):
-            response_element.embedding = deterministic_embedding(text)
-    await db.flush()
-
     interaction.response_json = response_json
-    interaction.response_element_id = response_element.id
     interaction.input_tokens = input_tokens
     interaction.output_tokens = output_tokens
     interaction.latency_ms = int((time.perf_counter() - started) * 1000)
     interaction.status = "succeeded"
     interaction.error_message = error_message
     await db.commit()
-    await db.refresh(response_element)
-    return response_element, interaction, source, text
+    await db.refresh(interaction)
+    return interaction, source, text
 
 
 async def update_text_embedding_if_needed(db: AsyncSession, element: WhiteboardElement) -> None:

@@ -3,6 +3,7 @@ import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
   Brush,
+  Check,
   Circle,
   Eraser,
   Highlighter,
@@ -11,8 +12,10 @@ import {
   Move,
   MoveUpRight,
   PenLine,
+  Plus,
   RectangleHorizontal,
   Redo2,
+  SendHorizontal,
   Sigma,
   Sparkles,
   StickyNote,
@@ -133,6 +136,8 @@ type AIMessage = {
   interactionId: string
   triggerType: AITriggerType
   content: string
+  source?: 'gemini' | 'local' | 'local-fallback'
+  added?: boolean
   elementId?: string
 }
 
@@ -1188,21 +1193,6 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
       return
     }
 
-    // Drop the answer near the middle of what the user is currently looking at.
-    let position: { x: number; y: number } | undefined
-    try {
-      const zoom = canvas.getZoom() || 1
-      const vpt = canvas.viewportTransform
-      if (vpt) {
-        position = {
-          x: (canvas.getWidth() / 2 - vpt[4]) / zoom - 180,
-          y: (canvas.getHeight() / 2 - vpt[5]) / zoom - 40,
-        }
-      }
-    } catch {
-      position = undefined // backend picks a default spot
-    }
-
     // Snapshot the current view so Gemini can read handwriting/drawings. Capped
     // to keep the payload small and the answer fast. Fails safe to text-only
     // (e.g. a tainted canvas from a cross-origin image).
@@ -1220,24 +1210,22 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     setIsAiOpen(true)
     setStatusMessage('Canvex AI is reading your canvas…')
     try {
-      const result = await askCanvexApi(page.id, prompt, position, snapshot)
-      // Render the reply straight from the HTTP response — no worker/WS wait.
-      addElementToCanvas(result.element)
+      const result = await askCanvexApi(page.id, prompt, snapshot)
+      // Show the answer in the panel; the user decides whether to add it.
       setAiMessages((prev) => [
         {
           interactionId: result.interaction.id,
           triggerType: result.interaction.trigger_type,
-          elementId: result.element.id,
           content: result.answer,
+          source: result.source,
+          added: false,
         },
-        ...prev.slice(0, 4),
+        ...prev.slice(0, 5),
       ])
       setStatusMessage(
         result.source === 'gemini'
           ? 'Canvex AI answered.'
-          : result.source === 'local-fallback'
-            ? 'Answered in offline mode — set GEMINI_API_KEY for real answers.'
-            : 'Answered in local mode — set GEMINI_API_KEY for real answers.',
+          : 'Answered in local mode — set GEMINI_API_KEY for real answers.',
       )
     } catch {
       setAiPrompt(prompt) // restore so the question isn't lost
@@ -1246,7 +1234,53 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
     } finally {
       setAiPending(false)
     }
-  }, [aiPrompt, page?.id, addElementToCanvas, showToolMessage])
+  }, [aiPrompt, page?.id, showToolMessage])
+
+  // Place an AI answer onto the canvas as a normal, fully-editable text element
+  // (drag to move, corner handles to resize, Delete/eraser to remove). It syncs
+  // to collaborators and is undoable via the standard object:added path.
+  const addAnswerToCanvas = useCallback(
+    (message: AIMessage) => {
+      const canvas = fabricRef.current
+      if (!canvas) {
+        showToolMessage('Open a page first.')
+        return
+      }
+      let left = 200
+      let top = 160
+      try {
+        const zoom = canvas.getZoom() || 1
+        const vpt = canvas.viewportTransform
+        if (vpt) {
+          left = (canvas.getWidth() / 2 - vpt[4]) / zoom - 170
+          top = (canvas.getHeight() / 2 - vpt[5]) / zoom - 60
+        }
+      } catch {
+        left = 200
+        top = 160
+      }
+      const textbox = new Textbox(message.content, {
+        left,
+        top,
+        width: 340,
+        fontSize: 22,
+        fontFamily: 'Caveat, cursive',
+        fill: '#3730a3',
+        lineHeight: 1.25,
+        padding: 6,
+      }) as CanvasObject
+      textbox.canvexType = 'text'
+      canvas.add(textbox)
+      canvas.setActiveObject(textbox)
+      setTool('select')
+      canvas.requestRenderAll()
+      setAiMessages((prev) =>
+        prev.map((m) => (m.interactionId === message.interactionId ? { ...m, added: true } : m)),
+      )
+      setStatusMessage('Answer added — drag to move, corner handles to resize, Delete to remove.')
+    },
+    [setTool, showToolMessage],
+  )
 
   const sendAIFeedback = useCallback(
     async (interactionId: string, isCorrect: boolean) => {
@@ -2569,43 +2603,77 @@ const CanvasBoard = ({ page, user, accessToken, highlightElement }: CanvasBoardP
               Close
             </button>
           </div>
-          <div className="mt-5 space-y-3 text-sm leading-6 text-slate-600">
-            <p className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3">
-              Write a question, or draw an equation like 2x + 5 = 13. Canvex will add the answer back onto the page.
-            </p>
-            <input
-              className="workspace-input"
-              placeholder="Ask about this canvas..."
-              value={aiPrompt}
-              disabled={aiPending}
-              onChange={(event) => setAiPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !aiPending) {
-                  askCanvex()
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="workspace-action-button w-full justify-center"
-              onClick={askCanvex}
-              disabled={aiPending}
-            >
-              <Sparkles size={15} className={aiPending ? 'animate-pulse' : undefined} />
-              {aiPending ? 'Thinking…' : 'Ask'}
-            </button>
+          <div className="mt-5 space-y-4 text-sm leading-6 text-slate-600">
             <div className="space-y-2">
+              <input
+                className="workspace-input"
+                placeholder="Ask anything, or write it on the canvas…"
+                value={aiPrompt}
+                disabled={aiPending}
+                onChange={(event) => setAiPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !aiPending) {
+                    askCanvex()
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="workspace-action-button w-full justify-center"
+                onClick={askCanvex}
+                disabled={aiPending || !aiPrompt.trim()}
+              >
+                {aiPending ? (
+                  <Sparkles size={15} className="animate-pulse" />
+                ) : (
+                  <SendHorizontal size={15} />
+                )}
+                {aiPending ? 'Thinking…' : 'Ask Canvex'}
+              </button>
+            </div>
+
+            <div className="space-y-3">
               {aiMessages.length === 0 ? (
-                <p className="rounded-lg border border-dashed border-indigo-200 p-3 font-handwriting text-lg text-slate-500">
-                  AI responses will appear here after Canvex reads your canvas.
-                </p>
+                <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/30 p-5 text-center">
+                  <Sparkles size={20} className="text-indigo-400" />
+                  <p className="font-handwriting text-lg leading-6 text-slate-500">
+                    Ask a question — Canvex reads your canvas to answer, and you choose whether to drop the answer onto the page.
+                  </p>
+                </div>
               ) : (
                 aiMessages.map((message) => (
-                  <article key={message.interactionId} className="rounded-lg border border-indigo-100 bg-white/70 p-3">
-                    <p className="font-handwriting text-lg leading-6 text-slate-700">{message.content}</p>
-                    <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-                      <span>{message.triggerType}</span>
-                      <div className="flex gap-2">
+                  <article
+                    key={message.interactionId}
+                    className="rounded-xl border border-indigo-100 bg-gradient-to-br from-white to-indigo-50/40 p-4 shadow-sm"
+                  >
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100/70 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-indigo-700">
+                        <Sparkles size={11} /> Canvex AI
+                      </span>
+                      {message.source && message.source !== 'gemini' && (
+                        <span className="rounded-full bg-amber-100/80 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                          local mode
+                        </span>
+                      )}
+                    </div>
+                    <p className="whitespace-pre-wrap font-handwriting text-lg leading-6 text-slate-700">
+                      {message.content}
+                    </p>
+                    <div className="mt-3 flex items-center justify-between gap-2">
+                      {message.added ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600">
+                          <Check size={14} /> Added to canvas
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700"
+                          onClick={() => addAnswerToCanvas(message)}
+                        >
+                          <Plus size={14} /> Add to canvas
+                        </button>
+                      )}
+                      <div className="flex gap-1">
                         <button
                           type="button"
                           className="workspace-icon-button"

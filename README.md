@@ -255,3 +255,9 @@ A full-codebase review against the implementation plan fixed ten bugs:
 - **Reads your handwriting** — the Ask flow attaches a downscaled (≤1536px) PNG snapshot of the current canvas view; the backend forwards it to the Gemini vision model and the prompt instructs it to interpret handwriting, equations, diagrams, and drawings. Falls back to text-only if the canvas can't be exported (e.g. a cross-origin image taints it).
 - **Resilient** — a Gemini error (bad key/model/network) degrades to the local fallback so the user always gets an instant answer; the UI reports the source (real Gemini vs offline/local mode).
 - Config: set `GEMINI_API_KEY` for real answers and `GEMINI_VISION_MODEL` to a current multimodal model (e.g. `gemini-3.5-flash`); blank key → local development fallback. The original canvas-trigger path (typing `?`, `/ai`, dropping an image) still enqueues to the AI worker.
+
+## AI Panel & Answer Placement (2026-07-22)
+
+- Redesigned the "Ask Canvex" panel: removed the sample-question hint, added a cleaner ask box with a "Thinking…" state, and premium answer cards (a "Canvex AI" badge, a "local mode" badge when the real model wasn't used, and a readable answer).
+- **Answers are no longer auto-placed on the canvas.** `POST /pages/{page_id}/ask` now returns the answer text only; the panel displays it and each answer has an **Add to canvas** action, so the user chooses what lands on the page.
+- Added answers become **first-class editable text elements** — drag to move, corner handles to resize, Delete/eraser to remove — created through the standard element path, so they sync to collaborators and are undoable. Once added, the card shows "Added to canvas".

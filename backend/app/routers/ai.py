@@ -128,23 +128,19 @@ async def ask_canvex(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AIAskResponse:
-    """Answer a question synchronously and drop the reply onto the canvas. Unlike
-    the canvas-trigger path (queued to the AI worker), this returns the answer in
-    the HTTP response, so the asker sees it instantly with no worker running."""
+    """Answer a question synchronously and return it in the HTTP response, so the
+    asker sees it instantly with no AI worker running. The reply is not placed on
+    the canvas — the frontend shows it and lets the user choose to add it."""
     page = await assert_page_access(db, page_id, current_user.id, MemberRole.EDITOR)
-    position = payload.position
-    element, interaction, source, answer = await answer_question_now(
+    interaction, source, answer = await answer_question_now(
         db,
         page=page,
         question=payload.question,
         snapshot_b64=payload.snapshot_b64,
-        pos_x=position.x if position else None,
-        pos_y=position.y if position else None,
     )
     return AIAskResponse(
         answer=answer,
         source=source,
-        element=ElementRead.model_validate(element),
         interaction=interaction_read(interaction),
         latency_ms=interaction.latency_ms or 0,
     )

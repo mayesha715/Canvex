@@ -54,17 +54,10 @@ class AISearchResult(BaseModel):
     similarity: float
 
 
-class CanvasPosition(BaseModel):
-    x: float
-    y: float
-
-
 class AIAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     # Optional base64 PNG of the canvas so Gemini can "see" it (vision model).
     snapshot_b64: str | None = None
-    # Optional scene coords for where to drop the answer element.
-    position: CanvasPosition | None = None
 
     @field_validator("question")
     @classmethod
@@ -78,6 +71,5 @@ class AIAskRequest(BaseModel):
 class AIAskResponse(BaseModel):
     answer: str
     source: str  # "gemini" | "local" | "local-fallback"
-    element: ElementRead
     interaction: AIInteractionRead
     latency_ms: int
